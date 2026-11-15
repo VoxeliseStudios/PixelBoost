@@ -23,6 +23,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Continue building after errors
+        # No fail-fast: xcodebuild keeps compiling after the first error so one
+        # run reports every error (read them all from the log / xcodebuild-log).
+        run: defaults write com.apple.dt.Xcode IDEBuildingContinueBuildingAfterErrors -bool YES
 
       - name: Select Xcode
         run: |
@@ -81,7 +85,7 @@ jobs:
             "UPSCALER_BRIDGE_API_KEY=$UPSCALER_BRIDGE_API_KEY" 2>&1 | tee /tmp/xcodebuild.log | tail -20
           if grep -q "error:" /tmp/xcodebuild.log; then
             echo "--- Compiler errors ---"
-            grep "error:" /tmp/xcodebuild.log | sort -u | head -60
+            grep "error:" /tmp/xcodebuild.log | sort -u
           fi
           APP=$(find build/PixelBoost.xcarchive -name "*.app" | head -1)
           if [ -z "$APP" ]; then
