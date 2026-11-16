@@ -25,7 +25,7 @@ pub mod shape;
 pub mod stream;
 pub mod text;
 
-pub use engine::{backend, gpu_name, gpu_speed, set_backend, set_gpu_tune_cache, Backend, Engine, TileEvent, TileOptions, Tuning};
+pub use engine::{backend, gpu_name, gpu_note, gpu_speed, set_backend, set_gpu_tune_cache, Backend, Engine, TileEvent, TileOptions, Tuning};
 pub use image::Image;
 
 /// Which SIMD convolution kernel is active.

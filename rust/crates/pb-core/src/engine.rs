@@ -85,6 +85,18 @@ pub fn gpu_speed() -> Option<(f64, f64)> {
     }
 }
 
+/// Why GPU inference is unavailable (no adapter, failed self-check).
+pub fn gpu_note() -> Option<String> {
+    #[cfg(feature = "gpu")]
+    {
+        pb_gpu::Gpu::get().is_none().then(pb_gpu::unavailable_reason).flatten()
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        None
+    }
+}
+
 /// The GPU's name when GPU inference is available ("AMD Radeon 610M (Vulkan)").
 pub fn gpu_name() -> Option<String> {
     #[cfg(feature = "gpu")]

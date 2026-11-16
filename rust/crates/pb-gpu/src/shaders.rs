@@ -179,7 +179,9 @@ pub fn conv_source(c: ConvCfg) -> String {
         ("@group(0) @binding(1) var<storage, read_write> src: array<f32>;", "vec4<f32>(src[I], 0.0, 0.0, 0.0)")
     };
     o.push_str(&PARAMS.replace("$SRCDECL", decl));
-    let _ = writeln!(o, "var<workgroup> As: array<vec4<f32>, {}>;", bk * bm / 4);
+    // Scalar array: threads writing different lanes of one shared vec4 race
+    // on Apple GPUs (lane stores compile to read-modify-write of the vector).
+    let _ = writeln!(o, "var<workgroup> As: array<f32, {}>;", bk * bm);
     let _ = writeln!(o, "var<workgroup> Bs: array<vec4<f32>, {}>;", bk * bn / 4);
     let _ = writeln!(o, "@compute @workgroup_size({nt})");
     o.push_str("fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) tid: u32) {\n");
@@ -214,20 +216,21 @@ pub fn conv_source(c: ConvCfg) -> String {
         if c.vec {
             for e in 0..4 {
                 let comp = ["x", "y", "z", "w"][e];
-                let _ = writeln!(o, "      As[((kl * 4u + {e}u) * {bm}u + am{t}) / 4u][am{t} % 4u] = v{t}.{comp};");
+                let _ = writeln!(o, "      As[(kl * 4u + {e}u) * {bm}u + am{t}] = v{t}.{comp};");
             }
         } else {
-            let _ = writeln!(o, "      As[(kl * {bm}u + am{t}) / 4u][am{t} % 4u] = v{t}.x;");
+            let _ = writeln!(o, "      As[kl * {bm}u + am{t}] = v{t}.x;");
         }
     }
     let _ = writeln!(o, "      for (var e = tid; e < {}u; e += {nt}u) {{", bk * bn / 4);
     let _ = writeln!(o, "        let nq = e % {}u;\n        let k = e / {}u;", bn / 4, bn / 4);
     o.push_str("        var v = vec4<f32>(0.0);\n        if (c0 + k < p.cin) { v = wts[(p.wofs + (tap * p.cin + c0 + k) * p.cout_pad + n0) / 4u + nq]; }\n        Bs[e] = v;\n      }\n");
     o.push_str("      workgroupBarrier();\n");
-    let _ = writeln!(o, "      let abase = tm * {tm4}u;\n      let bbase = tn * {tn4}u;");
+    let _ = writeln!(o, "      let abase = tm * {}u;\n      let bbase = tn * {tn4}u;", c.tm);
     for k in 0..bk {
         for i4 in 0..tm4 {
-            let _ = writeln!(o, "      let a{k}_{i4} = As[{}u + abase + {i4}u];", k * bm / 4);
+            let b0 = format!("{}u + abase + {}u", k * bm, i4 * 4);
+            let _ = writeln!(o, "      let a{k}_{i4} = vec4<f32>(As[{b0}], As[{b0} + 1u], As[{b0} + 2u], As[{b0} + 3u]);");
         }
         for q in 0..tn4 {
             let _ = writeln!(o, "      let b{k}_{q} = Bs[{}u + bbase + {q}u];", k * bn / 4);

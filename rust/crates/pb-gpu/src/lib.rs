@@ -8,6 +8,7 @@
 //! Nothing here is required: `Gpu::get()` returns `None` when there is no
 //! usable adapter (or `PB_GPU=0`), and every caller falls back to pb-nn.
 
+pub mod check;
 mod net;
 pub mod shaders;
 pub mod tune;
@@ -56,6 +57,14 @@ pub fn paused() -> bool {
 
 static GPU: Mutex<Option<Option<Arc<Gpu>>>> = Mutex::new(None);
 
+/// Why there is no GPU (no adapter, software only, failed self-check).
+static UNAVAILABLE: Mutex<Option<String>> = Mutex::new(None);
+
+/// The reason `Gpu::get()` returned `None`, if it did.
+pub fn unavailable_reason() -> Option<String> {
+    UNAVAILABLE.lock().unwrap().clone()
+}
+
 impl Gpu {
     /// The shared GPU, created on first use. `None` when disabled
     /// (`PB_GPU=0`), when only a software adapter exists, or after a failure.
@@ -68,13 +77,23 @@ impl Gpu {
             if std::env::var("PB_GPU").map(|v| v == "0" || v == "off").unwrap_or(false) {
                 return None;
             }
-            match Gpu::init() {
-                Ok(g) => Some(Arc::new(g)),
+            let g = match Gpu::init() {
+                Ok(g) => Arc::new(g),
                 Err(e) => {
                     eprintln!("pb-gpu: no GPU backend ({e}); using the CPU");
-                    None
+                    *UNAVAILABLE.lock().unwrap() = Some(e);
+                    return None;
+                }
+            };
+            // Never trust a GPU that can't reproduce the CPU networks.
+            if std::env::var("PB_GPU_NOCHECK").is_err() {
+                if let Err(e) = check::self_check(&g) {
+                    eprintln!("pb-gpu: {} failed the self-check ({e}); using the CPU", g.describe());
+                    *UNAVAILABLE.lock().unwrap() = Some(format!("{} failed the self-check: {e}", g.describe()));
+                    return None;
                 }
             }
+            Some(g)
         })
         .clone()
     }

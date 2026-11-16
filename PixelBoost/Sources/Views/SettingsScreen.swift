@@ -95,7 +95,7 @@ struct SettingsScreen: View {
 
     private var computeFooter: String {
         guard let c = computeInfo else { return "PixelBoost's own GPU kernels (Metal) run the upscaling networks; the first visit measures this iPhone once." }
-        if c.gpu == nil { return "No usable GPU — everything runs on the CPU kernels." }
+        if c.gpu == nil { return "No usable GPU — everything runs on the CPU kernels." + (c.gpuNote.map { " (\($0))" } ?? "") }
         switch compute {
         case "cpu": return "Networks run on the CPU kernels only."
         case "gpu": return "Networks always run on the GPU (Metal). If the app goes to the background mid-run, the rest continues on the CPU."

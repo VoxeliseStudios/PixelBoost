@@ -95,6 +95,8 @@ pub struct ComputeInfo {
     pub cpu_gflops: f64,
     /// Whether Auto runs networks on the GPU.
     pub auto_uses_gpu: bool,
+    /// Why the GPU is not used (no adapter, failed the self-check).
+    pub gpu_note: Option<String>,
 }
 
 #[derive(uniffi::Record, Clone)]
@@ -225,6 +227,7 @@ impl PixelBoostCore {
             cpu_kernel: pb_nn::conv::kernel_name().into(),
             gpu_gflops: g,
             cpu_gflops: c,
+            gpu_note: pb_core::gpu_note(),
         }
     }
 

@@ -37,7 +37,7 @@ impl TuneResult {
     }
 }
 
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 fn candidates(bn: u32) -> Vec<Tile> {
     let all = [

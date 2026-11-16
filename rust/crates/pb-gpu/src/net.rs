@@ -415,8 +415,40 @@ impl GpuNet {
         Ok(GpuNet { gpu, prog, wts, dummy, state: Mutex::new(None), fallback: Box::new(|| Err("synthetic".into())), cpu: Mutex::new(None), failed: Default::default() })
     }
 
+    /// One conv (PyTorch weight layout), optionally reading its input
+    /// through the 2x nearest upsample, for self-checks and diagnostics.
+    pub fn single_conv(gpu: Arc<Gpu>, w: &[f32], b: &[f32], cout: usize, cin: usize, up: bool) -> Result<GpuNet, String> {
+        let mut prog = Program::new(if up { 2 } else { 1 }, 1);
+        let bn = ConvCfg::bn_for(cout);
+        let cout_pad = cout.div_ceil(bn) * bn;
+        let mut arena = vec![0.0f32; 9 * cin * cout_pad + cout_pad];
+        for co in 0..cout {
+            for ci in 0..cin {
+                for k in 0..9 {
+                    arena[(k * cin + ci) * cout_pad + co] = w[(co * cin + ci) * 9 + k];
+                }
+            }
+            arena[9 * cin * cout_pad + co] = b[co];
+        }
+        prog.arena = arena;
+        prog.convs.push(ConvW { cin, cout, cout_pad, wofs: 0, bofs: 9 * cin * cout_pad, aofs: 0 });
+        let a = prog.buf(1, cin);
+        let o = prog.buf(if up { 2 } else { 1 }, cout);
+        prog.out = o;
+        let mut op = Op::conv(0, a, o);
+        if up {
+            op = op.up();
+        }
+        prog.ops.push(op);
+        use wgpu::util::DeviceExt;
+        let wts = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("conv weights"), contents: bytemuck_f32(&prog.arena), usage: wgpu::BufferUsages::STORAGE });
+        let dummy = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some("dummy"), size: 16, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
+        prog.arena = Vec::new();
+        Ok(GpuNet { gpu, prog, wts, dummy, state: Mutex::new(None), fallback: Box::new(|| Err("single conv".into())), cpu: Mutex::new(None), failed: Default::default() })
+    }
+
     /// Run on the GPU only (no fallback), for tuning.
-    pub(crate) fn try_forward(&self, x: &Fmap) -> Result<Fmap, String> {
+    pub fn try_forward(&self, x: &Fmap) -> Result<Fmap, String> {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.run_gpu(x))).map_err(|_| "GPU panicked".to_string())?
     }
 
