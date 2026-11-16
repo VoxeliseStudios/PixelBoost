@@ -62,6 +62,9 @@ pub struct UpscaleSettings {
     pub realism: f32,
     /// Photo model: also run Clean and mix per pixel by source texture.
     pub adaptive: bool,
+    /// Shrink the input to its real resolution first: 0 = Auto (measured),
+    /// 1 = off, else the fraction.
+    pub prescale: f32,
 }
 
 #[derive(uniffi::Record, Clone)]
@@ -80,6 +83,8 @@ pub struct UpscaleOutcome {
     pub backend: String,
     /// Photo + Clean fusion ran (twice the network compute).
     pub adaptive: bool,
+    /// The input was first shrunk to this fraction (its real resolution).
+    pub prescale: f32,
 }
 
 #[derive(uniffi::Record, Clone)]
@@ -279,8 +284,11 @@ impl PixelBoostCore {
     }
 
     pub fn upscale(&self, input_path: String, output_path: String, settings: UpscaleSettings, listener: Arc<dyn UpscaleListener>, cancel: Arc<CancelToken>) -> Result<UpscaleOutcome, PbError> {
+        // Anything still on Auto is decided from the photo (with a default
+        // phone budget; the app resolves with its learned speed first).
+        let settings = if smart::has_auto(&settings) { self.resolve(input_path.clone(), settings, 40.0, 180.0, false)?.settings } else { settings };
         let img = Image::open(&input_path)?;
-        let model = if settings.model == "auto" { classify::pick_model(&img).to_string() } else { settings.model.clone() };
+        let model = settings.model.clone();
         let denoise = if model == "fast" && settings.denoise > 0.0 { Some(settings.denoise) } else { None };
         let realism = if settings.realism > 0.0 { settings.realism.min(1.0) } else { 1.0 };
         let stack = pb_core::fusion::Stack::build(&model, denoise, realism, settings.adaptive, &mut |id, t| {
@@ -312,6 +320,7 @@ impl PixelBoostCore {
             ensemble: settings.ensemble.max(1) as usize,
             realism,
             adaptive: settings.adaptive,
+            prescale: if settings.prescale > 0.0 { settings.prescale.min(1.0) } else { 1.0 },
         };
         let lim = pb_core::stream::Limits { max_output_px: if settings.max_output_mp > 0.0 { (settings.max_output_mp as f64 * 1e6) as usize } else { 120_000_000 } };
         let res = pb_core::stream::upscale(&stack, &img, &st, lim, &mut |e| {
@@ -338,6 +347,7 @@ impl PixelBoostCore {
             capped,
             backend: stack.backend(),
             adaptive: matches!(stack, pb_core::fusion::Stack::Fused(_)),
+            prescale: st.prescale,
         })
     }
 

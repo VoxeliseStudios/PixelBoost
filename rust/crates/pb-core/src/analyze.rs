@@ -42,6 +42,12 @@ pub struct Measures {
     pub has_alpha: bool,
     /// Share of flat (single-colour) neighbourhoods (from the classifier).
     pub flat: f32,
+    /// Real resolution: the detail is this many times coarser than the
+    /// pixels (1 = sharp; 3 = an image blown up 3x before it got here).
+    pub eff: f32,
+    /// Drawn-art evidence at the real resolution (classify::Ink).
+    pub line: f32,
+    pub palette: f32,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -57,6 +63,10 @@ pub struct Recommendation {
     pub realism: f32,
     /// Photo + Clean fused per pixel by source texture (2x compute).
     pub adaptive: bool,
+    /// Shrink the input to its real resolution first (1 = no): an image
+    /// that was blown up before gives the network nothing at pixel scale,
+    /// so it runs on the real detail and upscales from there.
+    pub prescale: f32,
     /// Expected run time on the budget's device (seconds).
     pub est_seconds: f32,
     /// Short human-readable reasons, most important first.
@@ -252,21 +262,39 @@ fn skin_share(small: &Image) -> f32 {
 pub fn measure_parts(crop: &Image, small: &Image, width: usize, height: usize, has_alpha: bool) -> Measures {
     let l = luma255(crop);
     let st = classify::stats(small);
+    let eff = classify::effective_scale(crop);
+    let ink = classify::ink(&classify::at_real_resolution(small, eff, width, 512));
+    // Sharpness of what the network will actually see (after prescale).
+    let sharp_src = if eff >= 1.5 { classify::at_real_resolution(crop, eff, crop.w, usize::MAX) } else { crop.clone() };
+    let ls = luma255(&sharp_src);
+    // Ink lines are decisive; flat-fill evidence alone needs a grain-free
+    // picture (a sharp photo of a wall still has sensor noise).
+    let kind = match classify::kind_of_ink(&ink, eff) {
+        "anime" if ink.line > 0.0145 || l_noise(&l, crop) < 2.5 => "anime",
+        _ => "photo",
+    };
     let f = 384.0 / small.w.max(small.h) as f32;
     let tiny = if f < 1.0 { resize(small, ((small.w as f32 * f) as usize).max(8), ((small.h as f32 * f) as usize).max(8), Filter::Box) } else { small.clone() };
     let brightness = tiny.px.iter().map(|p| Image::luma(*p)).sum::<f32>() / tiny.px.len().max(1) as f32;
     Measures {
         width,
         height,
-        kind: classify::kind_of(&st),
+        kind,
         noise: noise_sigma(&l, crop.w, crop.h),
         blocking: blocking(&l, crop.w, crop.h),
-        sharpness: sharpness(&l, crop.w, crop.h),
+        sharpness: sharpness(&ls, sharp_src.w, sharp_src.h),
         skin: skin_share(&tiny),
         brightness,
         has_alpha,
         flat: st.flat,
+        eff,
+        line: ink.line,
+        palette: ink.palette,
     }
+}
+
+fn l_noise(l: &[f32], crop: &Image) -> f32 {
+    noise_sigma(l, crop.w, crop.h)
 }
 
 fn shrink(img: &Image, max_side: usize) -> Image {
@@ -339,7 +367,26 @@ fn pct(v: f32) -> u32 {
     (v * 100.0).round() as u32
 }
 
+/// Settings the user chose themselves; `None` = decide from the photo.
+#[derive(Debug, Clone, Default)]
+pub struct Fixed {
+    pub model: Option<String>,
+    pub scale: Option<f32>,
+    pub fidelity: Option<String>,
+    pub detail: Option<f32>,
+    pub ensemble: Option<usize>,
+    pub denoise: Option<f32>,
+    pub realism: Option<f32>,
+    pub adaptive: Option<bool>,
+    pub prescale: Option<f32>,
+}
+
 pub fn recommend(m: &Measures, b: Budget) -> Recommendation {
+    recommend_fixed(m, b, &Fixed::default())
+}
+
+/// Choose every setting the user left on Auto, around the ones they fixed.
+pub fn recommend_fixed(m: &Measures, b: Budget, fx: &Fixed) -> Recommendation {
     let mut why: Vec<String> = Vec::new();
     let anime = m.kind == "anime";
     let long = m.width.max(m.height) as f32;
@@ -357,15 +404,38 @@ pub fn recommend(m: &Measures, b: Budget) -> Recommendation {
     while scale > 2.0 && mp_in * scale * scale > max_mp {
         scale = SCALES.iter().copied().rev().find(|s| *s < scale).unwrap_or(2.0);
     }
-    if long >= target {
+    if let Some(s) = fx.scale.filter(|s| *s >= 1.0) {
+        scale = s;
+    } else if long >= target {
         why.push(format!("Already {}×{} — 2× is plenty", m.width, m.height));
     } else {
         why.push(format!("{}×{} → {}× gives about {} px on the long side", m.width, m.height, scale as u32, (long * scale) as u32));
     }
+    // ---- real resolution: run the network on the real detail.
+    // A network factor above ~6x means a second model pass over the 4x
+    // intermediate (16x the pixels of the first). Worth it for images blown
+    // up 3x or more, or while the intermediate stays small; otherwise shrink
+    // less so one pass plus a mild resample covers the factor.
+    let mut prescale = if m.eff >= 1.5 { 1.0 / m.eff } else { 1.0 };
+    let intermediate_mp = (m.width * m.height) as f32 * prescale * prescale * 16.0 / 1e6;
+    if m.eff < 3.0 && scale / prescale > 6.0 && intermediate_mp > 2.5 {
+        prescale = (scale / 6.0).min(1.0);
+    }
+    if prescale > 0.85 {
+        prescale = 1.0;
+    }
+    if let Some(p) = fx.prescale.filter(|p| *p > 0.0) {
+        prescale = p.min(1.0);
+    } else if prescale < 1.0 {
+        why.push(format!("Detail is {:.1}× coarser than the pixels (blown up before) → the network works on the real detail, {}×{}", m.eff, (m.width as f32 * prescale) as u32, (m.height as f32 * prescale) as u32));
+    }
+    // Network input size and factor after the prescale.
+    let (ew, eh) = (((m.width as f32 * prescale) as usize).max(1), ((m.height as f32 * prescale) as usize).max(1));
+    let net_scale = scale / prescale;
 
     // ---- model + denoise
     let mut denoise = 0.0f32;
-    let mut model = if anime {
+    let mut model: &str = if anime {
         if blocky {
             why.push("Drawn art with compression blocks → Line Art model (trained on compressed frames)".into());
             "lineart"
@@ -395,13 +465,13 @@ pub fn recommend(m: &Measures, b: Budget) -> Recommendation {
 
     // ---- budget: fall back to a cheaper network when the phone would take
     // too long (the cloud has no such limit).
-    let est = |model: &str, ens: usize| -> f32 { (gflop(model, m.width, m.height, scale, ens) / b.gflops.max(1.0) as f64) as f32 };
+    let est = |model: &str, ens: usize| -> f32 { (gflop(model, ew, eh, net_scale, ens) / b.gflops.max(1.0) as f64) as f32 };
     // Adaptive fusion (Photo where the source has texture, Clean on skin
     // and flat areas) costs two networks: use it when it fits the budget.
     let mut adaptive = false;
     let mut realism = 1.0f32;
     let fits_fused = |e: usize| b.cloud || est("photo", 2 * e) <= b.max_seconds;
-    if portrait {
+    if portrait && !very_noisy {
         if fits_fused(1) {
             model = "photo";
             adaptive = true;
@@ -423,9 +493,28 @@ pub fn recommend(m: &Measures, b: Budget) -> Recommendation {
             adaptive = false;
         }
     }
+    if let Some(fm) = fx.model.as_deref().filter(|m| *m != "auto") {
+        if fm != model {
+            why.push(format!("{} (your choice)", models::find(fm).map(|i| i.name).unwrap_or(fm)));
+        }
+        model = fm;
+        adaptive = model == "photo" && fx.adaptive.unwrap_or(false);
+        realism = fx.realism.unwrap_or(1.0);
+        denoise = if model == "fast" { fx.denoise.unwrap_or(denoise) } else { 0.0 };
+    } else {
+        if let Some(a) = fx.adaptive {
+            adaptive = a && model == "photo";
+        }
+        if let Some(r) = fx.realism.filter(|_| model == "photo") {
+            realism = r;
+        }
+    }
 
     // ---- clarity (fidelity)
-    let fidelity = if noisy || blocky {
+    let fixed_fid = fx.fidelity.as_deref().filter(|f| *f != "auto");
+    let fidelity = if let Some(f) = fixed_fid {
+        f
+    } else if noisy || blocky {
         why.push("Natural clarity: Faithful would copy the noise and blocks back in".into());
         "natural"
     } else if portrait {
@@ -452,12 +541,18 @@ pub fn recommend(m: &Measures, b: Budget) -> Recommendation {
     if portrait {
         detail = detail.min(0.22);
     }
-    let detail = detail.clamp(0.05, 0.7);
+    let detail = match fx.detail.filter(|d| *d >= 0.0) {
+        Some(d) => d.min(1.0),
+        None => detail.clamp(0.05, 0.7),
+    };
 
     // ---- quality passes when they fit the budget
     let mut ensemble = 1;
-    if b.cloud {
-        ensemble = 2;
+    if let Some(e) = fx.ensemble.filter(|e| *e > 0) {
+        ensemble = e;
+    } else if b.cloud {
+        // The server has time: all 8 passes when the network input is small.
+        ensemble = if ew * eh <= 400_000 { 8 } else { 2 };
     } else {
         for e in [8usize, 2] {
             let limit = if e == 8 { 0.25 } else { 0.5 };
@@ -467,7 +562,7 @@ pub fn recommend(m: &Measures, b: Budget) -> Recommendation {
             }
         }
     }
-    if ensemble > 1 {
+    if ensemble > 1 && fx.ensemble.is_none() {
         why.push(format!("{} quality fits the time budget", if ensemble >= 8 { "Max" } else { "High" }));
     }
     if m.has_alpha {
@@ -502,7 +597,7 @@ pub fn recommend(m: &Measures, b: Budget) -> Recommendation {
         ""
     };
     let summary = format!("{what} · {}× · {name}{extra}", scale as u32);
-    Recommendation { model: model.into(), scale, fidelity: fidelity.into(), detail, denoise, ensemble, realism, adaptive, est_seconds, reasons: why, summary }
+    Recommendation { model: model.into(), scale, fidelity: fidelity.into(), detail, denoise, ensemble, realism, adaptive, prescale, est_seconds, reasons: why, summary }
 }
 
 fn fmt_secs(s: f32) -> String {
@@ -554,6 +649,7 @@ mod tests {
         }
         let a = measure(&clean);
         let b = measure(&noisy);
+        assert_eq!(b.kind, "photo", "grainy pictures are photos");
         assert!(a.noise < b.noise / 3.0, "clean noise {}", a.noise);
         assert!(b.noise > 5.0, "noisy noise {}", b.noise);
         let r = recommend(&b, Budget::default());
@@ -566,9 +662,13 @@ mod tests {
         let img = scene(512, 384);
         let small = resize(&img, 128, 96, Filter::Box);
         let soft = resize(&small, 512, 384, Filter::CatmullRom);
-        let a = measure(&img).sharpness;
-        let b = measure(&soft).sharpness;
+        // Raw pixel-scale sharpness drops...
+        let raw = |im: &Image| sharpness(&luma255(im), im.w, im.h);
+        let (a, b) = (raw(&img), raw(&soft));
         assert!(b < a - 0.1, "sharp {a} soft {b}");
+        // ...and the analyzer finds the real resolution (4x blown up).
+        let m = measure(&soft);
+        assert!(m.eff >= 2.5, "eff {}", m.eff);
     }
 
     #[test]
@@ -592,6 +692,7 @@ mod tests {
     #[test]
     fn scale_follows_size_and_cap() {
         let mut m = measure(&scene(64, 64));
+        m.kind = "photo";
         m.width = 640;
         m.height = 480;
         assert_eq!(recommend(&m, Budget::default()).scale, 8.0);
@@ -640,5 +741,50 @@ mod tests {
         assert_ne!(slow.model, "photo");
         let cloud = recommend(&m, Budget { cloud: true, ..Budget::default() });
         assert!(cloud.adaptive);
+    }
+}
+
+#[cfg(test)]
+mod real_resolution_tests {
+    use super::*;
+    use crate::resample::{resize, Filter};
+
+    fn detailed(w: usize, h: usize) -> Image {
+        let mut img = Image::new(w, h);
+        let mut s = 12345u32;
+        for (i, p) in img.px.iter_mut().enumerate() {
+            s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let n = (s >> 24) as f32 / 255.0;
+            let (x, y) = ((i % w) as f32, (i / w) as f32);
+            let v = 0.5 + 0.25 * (x * 0.31).sin() * (y * 0.23).cos() + 0.2 * (n - 0.5);
+            *p = [v, v * 0.9, v * 0.8, 1.0];
+        }
+        img
+    }
+
+    #[test]
+    fn blown_up_images_are_found() {
+        let sharp = detailed(300, 300);
+        assert_eq!(classify::effective_scale(&sharp), 1.0);
+        let small = resize(&sharp, 100, 100, Filter::Lanczos3);
+        let blown = resize(&small, 300, 300, Filter::CatmullRom);
+        let e = classify::effective_scale(&blown);
+        assert!(e >= 2.5, "3x blown-up image read as {e}");
+        let m = measure(&blown);
+        let r = recommend(&m, Budget { gflops: 2000.0, ..Budget::default() });
+        assert!(r.prescale < 0.45, "prescale {}", r.prescale);
+    }
+
+    #[test]
+    fn fixed_settings_are_kept() {
+        let m = measure(&detailed(200, 160));
+        let fx = Fixed { model: Some("anime".into()), fidelity: Some("off".into()), ensemble: Some(4), detail: Some(0.9), ..Fixed::default() };
+        let r = recommend_fixed(&m, Budget::default(), &fx);
+        assert_eq!((r.model.as_str(), r.fidelity.as_str(), r.ensemble), ("anime", "off", 4));
+        assert!((r.detail - 0.9).abs() < 1e-6);
+        // Auto fields still come from the photo.
+        let auto = recommend_fixed(&m, Budget::default(), &Fixed { model: Some("photo".into()), ..Fixed::default() });
+        assert_eq!(auto.model, "photo");
+        assert!(auto.fidelity != "auto" && auto.ensemble >= 1 && auto.detail >= 0.0);
     }
 }

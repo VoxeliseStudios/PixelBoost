@@ -18,8 +18,51 @@ pub fn upscale_cmd(args: &[String]) -> Result<(), String> {
     let dir = models_dir(args);
     let model = flag(args, "--model").unwrap_or("auto");
     let img = Image::open(&args[1])?;
+    // `--smart`: resolve everything from the photo like the app does
+    // (`--gflops`, `--seconds`, `--cloud` set the budget).
+    if args.iter().any(|a| a == "--smart") {
+        let m = pb_core::analyze::measure(&img);
+        let b = pb_core::analyze::Budget {
+            gflops: flag(args, "--gflops").and_then(|v| v.parse().ok()).unwrap_or(40.0),
+            max_seconds: flag(args, "--seconds").and_then(|v| v.parse().ok()).unwrap_or(180.0),
+            max_output_mp: 120.0,
+            cloud: args.iter().any(|a| a == "--cloud"),
+        };
+        let r = pb_core::analyze::recommend(&m, b);
+        eprintln!("smart: {} {}x prescale {:.2} {} detail {:.2} denoise {:.2} quality {} realism {:.2} adaptive {} (~{:.0}s)", r.model, r.scale, r.prescale, r.fidelity, r.detail, r.denoise, r.ensemble, r.realism, r.adaptive, r.est_seconds);
+        for w in &r.reasons {
+            eprintln!("  - {w}");
+        }
+        let st = Settings {
+            scale: r.scale,
+            fidelity: Fidelity::parse(&r.fidelity).unwrap_or(Fidelity::Natural),
+            detail: r.detail,
+            tile: flag(args, "--tile").and_then(|v| v.parse().ok()).unwrap_or(128),
+            pad: 16,
+            ensemble: r.ensemble,
+            realism: r.realism,
+            adaptive: r.adaptive,
+            prescale: r.prescale,
+        };
+        let denoise = (r.denoise > 0.0).then_some(r.denoise);
+        let stack = pb_core::fusion::Stack::load(&dir, &r.model, denoise, r.realism, r.adaptive)?;
+        eprintln!("backend: {}", stack.backend());
+        let lim = pb_core::stream::Limits { max_output_px: 120_000_000 };
+        let (out, rep, _) = pb_core::stream::upscale(&stack, &img, &st, lim, &mut |e| {
+            eprint!("\r  tile {}/{}   ", e.done, e.total);
+            true
+        })
+        .ok_or("cancelled")?;
+        eprintln!();
+        out.save(&args[2], 95)?;
+        println!("{}x{} -> {}x{} in {:.1}s ({})", rep.in_w, rep.in_h, rep.out_w, rep.out_h, rep.seconds, rep.model);
+        return Ok(());
+    }
     let model = if model == "auto" { pb_core::classify::pick_model(&img).to_string() } else { model.to_string() };
     let mut st = Settings::default();
+    if let Some(p) = flag(args, "--prescale").and_then(|v| v.parse().ok()) {
+        st.prescale = p;
+    }
     if let Some(r) = flag(args, "--realism").and_then(|v| v.parse().ok()) {
         st.realism = r;
     }

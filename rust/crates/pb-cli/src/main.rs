@@ -227,8 +227,8 @@ fn analyze_cmd(args: &[String]) -> Result<(), String> {
         let r = pb_core::analyze::recommend(&m, b);
         let name = Path::new(f).file_name().unwrap().to_string_lossy();
         println!(
-            "{name:<10} {:>4}x{:<4} {:<5} noise {:>5.2} block {:.2} sharp {:.3} skin {:.2} | {} {}x {} d{:.2} dn{:.2} e{} ~{:.0}s  ({:.0} ms)",
-            m.width, m.height, m.kind, m.noise, m.blocking, m.sharpness, m.skin, r.model, r.scale, r.fidelity, r.detail, r.denoise, r.ensemble, r.est_seconds, t.elapsed().as_secs_f64() * 1000.0
+            "{name:<12} {:>4}x{:<4} {:<5} eff {:.2} line {:.3} pal {:.2} noise {:>5.2} block {:.2} sharp {:.3} skin {:.2} | {}{} {}x pre {:.2} {} d{:.2} dn{:.2} e{} ~{:.0}s  ({:.0} ms)",
+            m.width, m.height, m.kind, m.eff, m.line, m.palette, m.noise, m.blocking, m.sharpness, m.skin, r.model, if r.adaptive { "+adaptive" } else { "" }, r.scale, r.prescale, r.fidelity, r.detail, r.denoise, r.ensemble, r.est_seconds, t.elapsed().as_secs_f64() * 1000.0
         );
         if verbose {
             for w in &r.reasons {

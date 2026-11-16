@@ -4,9 +4,13 @@ import SwiftUI
 struct UpscaleChoice: DynamicProperty {
     @AppStorage("up.model") var model = "auto"
     @AppStorage("up.scale") var scale = 4.0
-    @AppStorage("up.fidelity") var fidelity = "natural"
+    /// "auto" = chosen from the photo.
+    @AppStorage("up.fidelityA") var fidelity = "auto"
     @AppStorage("up.detail") var detail = 0.35
-    @AppStorage("up.quality") var quality = 1
+    /// Detail chosen from the photo.
+    @AppStorage("up.detailAuto") var detailAuto = true
+    /// Self-ensemble passes; 0 = chosen from the photo and the time budget.
+    @AppStorage("up.qualityA") var quality = 0
     @AppStorage("up.denoise") var denoise = 0.0
     /// Photo model texture strength (1 = full GAN texture).
     @AppStorage("up.realism") var realism = 1.0
@@ -21,9 +25,9 @@ struct UpscaleChoice: DynamicProperty {
     @AppStorage("up.maxWait") var maxWait = 180.0
 
     var settings: UpscaleSettings {
-        UpscaleSettings(model: model, scale: Float(scale), fidelity: fidelity, detail: Float(detail),
-                        denoise: Float(denoise), ensemble: UInt32(quality), tile: 128, maxOutputMp: 120,
-                        realism: Float(realism), adaptive: adaptive)
+        UpscaleSettings(model: model, scale: Float(scale), fidelity: fidelity, detail: detailAuto ? -1 : Float(detail),
+                        denoise: Float(denoise), ensemble: UInt32(max(quality, 0)), tile: 128, maxOutputMp: 120,
+                        realism: Float(realism), adaptive: adaptive, prescale: 0)
     }
 
     /// Settings for the server worker.
@@ -31,7 +35,8 @@ struct UpscaleChoice: DynamicProperty {
 
     static func cloudSettings(_ s: UpscaleSettings) -> [String: Any] {
         ["model": s.model, "scale": Double(s.scale), "fidelity": s.fidelity, "detail": Double(s.detail), "denoise": Double(s.denoise),
-         "ensemble": Int(s.ensemble), "format": "png", "realism": Double(s.realism), "adaptive": s.adaptive]
+         "ensemble": Int(s.ensemble), "format": "png", "realism": Double(s.realism), "adaptive": s.adaptive,
+         "prescale": Double(s.prescale)]
     }
 
     /// Smart analysis of a photo for where it will run (cached per photo).
@@ -39,9 +44,17 @@ struct UpscaleChoice: DynamicProperty {
         await SmartCache.shared.analysis(for: url, cloud: cloud, gflops: gflops, maxWait: maxWait)
     }
 
-    /// Settings to run with: Smart's for this photo, else the manual ones.
+    /// The manual settings with everything left on Auto decided from this
+    /// photo (real resolution, content, noise, blocks, softness, budget).
+    func manualAnalysis(for url: URL, cloud: Bool) async -> PhotoAnalysis? {
+        await SmartCache.shared.resolve(url, settings: settings, cloud: cloud, gflops: gflops, maxWait: maxWait)
+    }
+
+    /// Settings to run with: Smart's for this photo, else the manual ones
+    /// with their Auto fields filled in from the photo.
     func resolved(for url: URL, cloud: Bool) async -> UpscaleSettings {
         if smart, let a = await analysis(for: url, cloud: cloud) { return a.settings }
+        if let a = await manualAnalysis(for: url, cloud: cloud) { return a.settings }
         return settings
     }
 
@@ -52,6 +65,7 @@ struct UpscaleChoice: DynamicProperty {
         scale = Double(s.scale)
         fidelity = s.fidelity
         detail = Double(s.detail)
+        detailAuto = false
         denoise = Double(s.denoise)
         quality = Int(s.ensemble)
         realism = Double(s.realism)
@@ -94,6 +108,26 @@ final class SmartCache {
         let budget = Float(maxWait <= 0 ? 1e9 : maxWait)
         let t = Task.detached(priority: .userInitiated) { () -> PhotoAnalysis? in
             try? Core.engine.analyze(inputPath: path, deviceGflops: Float(gflops), maxSeconds: budget, maxOutputMp: 120, cloud: cloud)
+        }
+        running[key] = t
+        let a = await t.value
+        running[key] = nil
+        if let a {
+            if done.count > 40 { done.removeAll() }
+            done[key] = a
+        }
+        return a
+    }
+
+    /// Manual settings with their Auto fields resolved (cached per choice).
+    func resolve(_ url: URL, settings s: UpscaleSettings, cloud: Bool, gflops: Double, maxWait: Double) async -> PhotoAnalysis? {
+        let key = "r|\(url.path)|\(cloud)|\(Int(gflops / 5))|\(Int(maxWait))|\(s.model)|\(s.scale)|\(s.fidelity)|\(s.detail)|\(s.ensemble)|\(s.denoise)|\(s.realism)|\(s.adaptive)"
+        if let a = done[key] { return a }
+        if let t = running[key] { return await t.value }
+        let path = url.path
+        let budget = Float(maxWait <= 0 ? 1e9 : maxWait)
+        let t = Task.detached(priority: .userInitiated) { () -> PhotoAnalysis? in
+            try? Core.engine.resolve(inputPath: path, settings: s, deviceGflops: Float(gflops), maxSeconds: budget, cloud: cloud)
         }
         running[key] = t
         let a = await t.value

@@ -373,10 +373,29 @@ fn axis_taps(o0: usize, o1: usize, m: usize, o: usize, origin: isize, len: usize
 
 /// Upscale `img` per `st`, bounded by `lim`. Returns the 8-bit result.
 pub fn upscale(engine: &dyn Upscaler, img: &Image, st: &Settings, lim: Limits, progress: &mut dyn FnMut(StreamEvent<'_>) -> bool) -> Option<(Rgba8, Report, bool)> {
+    // Prescale: shrink to the real resolution, then upscale by the
+    // correspondingly larger factor so the output size is unchanged.
+    let p = st.prescale;
+    if p > 0.0 && p < 0.97 {
+        let (sw, sh) = (((img.w as f32 * p).round() as usize).max(8), ((img.h as f32 * p).round() as usize).max(8));
+        if sw < img.w && sh < img.h {
+            let small = crate::resample::resize(img, sw, sh, Filter::Lanczos3);
+            let target = (img.w as f64 * st.scale.clamp(1.0, 16.0) as f64).round() / sw as f64;
+            let mut s2 = st.clone();
+            s2.prescale = 1.0;
+            s2.scale = (target as f32).min(64.0);
+            let r = upscale(engine, &small, &s2, lim, progress);
+            return r.map(|(o, mut rep, c)| {
+                rep.in_w = img.w;
+                rep.in_h = img.h;
+                (o, rep, c)
+            });
+        }
+    }
     let t0 = Instant::now();
     let had_alpha = img.has_alpha();
     let px = (img.w * img.h) as f64;
-    let mut target = st.scale.clamp(1.0, 16.0) as f64;
+    let mut target = st.scale.clamp(1.0, 64.0) as f64;
     let mut capped = false;
     if px * target * target > lim.max_output_px as f64 {
         target = (lim.max_output_px as f64 / px).sqrt().max(1.0);

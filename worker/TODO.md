@@ -20,3 +20,7 @@ the same WORKER_KEY (Mel ~/bots/Music/.env: PIXELBOOST_WORKER_KEY).
 - [ ] GPU: the image builds pb-core without `gpu`. To use this PC's iGPU: Mesa Vulkan (RADV) in the
       runtime image, `devices: [/dev/dri]`, build with the feature — ~1.4x over the CPU here, but it
       shares the iGPU with the desktop/games (gamemode deprioritizes Docker).
+
+## 5.5 (2026-11-16)
+- [x] Settings left on Auto (model, clarity "auto", detail < 0, quality 0, prescale 0) are resolved
+      from the photo with the server budget (all 8 passes when the network input is <= 0.4 MP).

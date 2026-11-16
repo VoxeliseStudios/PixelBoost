@@ -207,10 +207,12 @@ struct StudioView: View {
             log(info: info, settings: s, outcome: o, ms: Int(Date().timeIntervalSince(began) * 1000))
             guard let o else { return }
             resultPreview = job.canvas
-            let plan = Core.engine.plan(width: info.width, height: info.height, model: o.model, scale: Float(scale), tile: 128)
+            // The network ran on the prescaled input, by the larger factor.
+            let p = Double(max(min(o.prescale, 1), 0.05))
+            let plan = Core.engine.plan(width: UInt32(Double(info.width) * p), height: UInt32(Double(info.height) * p), model: o.model, scale: Float(scale / p), tile: 128)
             if o.seconds > 2 {
                 let fused = o.adaptive ? 2.0 : 1.0
-                choice.gflops = 0.7 * choice.gflops + 0.3 * (plan.gflop * Double(o.passes) * Double(max(quality, 1)) * fused / o.seconds)
+                choice.gflops = 0.7 * choice.gflops + 0.3 * (plan.gflop * Double(o.passes) * Double(max(Int(s.ensemble), 1)) * fused / o.seconds)
             }
             let entry = HistoryEntry(id: "", createdAt: 0, model: o.model, scale: Float(scale), inWidth: info.width, inHeight: info.height,
                                      outWidth: o.width, outHeight: o.height, seconds: o.seconds, fidelityDb: o.fidelityDb, resultPath: "", thumbPath: "")

@@ -10,6 +10,8 @@ struct UpscaleSheet: View {
     let choice = UpscaleChoice()
     @State private var autoPick: String?
     @State private var analysis: PhotoAnalysis?
+    /// The manual choices with their Auto fields filled in for this photo.
+    @State private var manual: PhotoAnalysis?
     @State private var analyzing = false
     @State private var showWhy = false
     @Environment(\.dismiss) private var dismiss
@@ -43,6 +45,10 @@ struct UpscaleSheet: View {
             analyzing = true
             analysis = await choice.analysis(for: url, cloud: choice.whereTo == "cloud")
             analyzing = false
+        }
+        .task(id: "\(choice.smart)|\(choice.whereTo)|\(choice.maxWait)|\(app.current?.path ?? "")|\(choice.model)|\(choice.scale)|\(choice.fidelity)|\(choice.quality)|\(choice.detailAuto)|\(choice.detail)|\(choice.adaptive)|\(choice.realism)") {
+            guard !choice.smart, let url = app.current else { manual = nil; return }
+            manual = await choice.manualAnalysis(for: url, cloud: choice.whereTo == "cloud")
         }
     }
 
@@ -109,6 +115,7 @@ struct UpscaleSheet: View {
         if s.model == "photo", s.adaptive { parts.append("Adaptive") }
         if s.model == "photo", s.realism < 0.995 { parts.append("realism \(Int(s.realism * 100))%") }
         if s.ensemble > 1 { parts.append(s.ensemble >= 8 ? "Max" : "High") }
+        if s.prescale < 0.99 { parts.append("works on the real \(Int(Float(a.width) * s.prescale)) × \(Int(Float(a.height) * s.prescale))") }
         if choice.whereTo != "cloud", a.estSeconds > 0 { parts.append("≈ \(formatDuration(Double(a.estSeconds)))") }
         return parts.joined(separator: " · ")
     }
@@ -134,6 +141,7 @@ struct UpscaleSheet: View {
                 Card(title: "Size", trailing: outputText) {
                     ChipPicker(options: [(2.0, "2×"), (3.0, "3×"), (4.0, "4×"), (6.0, "6×"), (8.0, "8×")], selection: choice.$scale)
                 }
+                manualSummary
                 Card(title: "Look") {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 96), spacing: 8)], spacing: 8) {
                         ForEach(UpscaleChoice.models) { m in
@@ -143,12 +151,24 @@ struct UpscaleSheet: View {
                     Text(modelBlurb).font(.caption).foregroundStyle(Theme.dim)
                 }
                 Card(title: "Quality") {
-                    ChipPicker(options: [(1, "Standard"), (2, "High · 2 passes"), (8, "Max · 8 passes")], selection: choice.$quality)
+                    ChipPicker(options: [(0, "Auto"), (1, "Standard"), (2, "High · 2 passes"), (8, "Max · 8 passes")], selection: choice.$quality)
+                    if choice.quality == 0, let m = manual {
+                        autoNote("Auto: \(m.settings.ensemble >= 8 ? "Max · 8 passes" : m.settings.ensemble > 1 ? "High · \(m.settings.ensemble) passes" : "Standard") — what fits \(choice.whereTo == "cloud" ? "the server" : "your longest wait")")
+                    }
                 }
                 Card(title: "Clarity") {
-                    ChipPicker(options: [("off", "Raw AI"), ("natural", "Natural"), ("faithful", "Faithful")], selection: choice.$fidelity)
+                    ChipPicker(options: [("auto", "Auto"), ("off", "Raw AI"), ("natural", "Natural"), ("faithful", "Faithful")], selection: choice.$fidelity)
                     Text(fidelityBlurb).font(.caption).foregroundStyle(Theme.dim)
-                    SliderRow(label: "Detail", value: choice.$detail)
+                    if choice.fidelity == "auto", let m = manual { autoNote("Auto: \(m.settings.fidelity.capitalized) for this photo") }
+                    Toggle(isOn: choice.$detailAuto) {
+                        Text("Auto detail").font(.subheadline)
+                    }
+                    .tint(Theme.amber)
+                    if choice.detailAuto {
+                        if let m = manual { autoNote("Auto: detail \(Int(m.settings.detail * 100))% for this photo") }
+                    } else {
+                        SliderRow(label: "Detail", value: choice.$detail)
+                    }
                     if choice.model == "fast" { SliderRow(label: "Denoise", value: choice.$denoise) }
                 }
                 if choice.model == "photo" {
@@ -165,6 +185,22 @@ struct UpscaleSheet: View {
                             .font(.caption).foregroundStyle(Theme.dim)
                     }
                 }
+    }
+
+    /// What Auto decided for this photo, plus what the analysis saw.
+    private func autoNote(_ text: String) -> some View {
+        Label(text, systemImage: "sparkles").font(.caption).foregroundStyle(Theme.amber)
+    }
+
+    @ViewBuilder
+    private var manualSummary: some View {
+        if let m = manual {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Looked at this photo: \(m.kind == "anime" ? "drawn art" : "photo / render") · \(m.width) × \(m.height)\(m.realResolution < 0.95 ? " · real detail \(Int(Float(m.width) * m.realResolution)) × \(Int(Float(m.height) * m.realResolution))" : "")")
+                    .font(.caption).foregroundStyle(Theme.dim)
+                if choice.model == "auto" { autoNote("Auto look: \(UpscaleChoice.name(m.settings.model))\(m.settings.adaptive ? " · Adaptive" : "")") }
+            }
+        }
     }
 
     // MARK: where
@@ -210,7 +246,7 @@ struct UpscaleSheet: View {
 
     // MARK: text + estimates
 
-    private var effectiveModel: String { choice.model == "auto" ? (autoPick ?? "photo") : choice.model }
+    private var effectiveModel: String { choice.model == "auto" ? (manual?.settings.model ?? autoPick ?? "photo") : choice.model }
 
     private var outputText: String? {
         guard let i = app.info else { return nil }
@@ -234,6 +270,7 @@ struct UpscaleSheet: View {
             let p = Core.engine.plan(width: i.width, height: i.height, model: s.model, scale: s.scale, tile: 128)
             return p.gflop * Double(max(s.ensemble, 1)) * (s.scale > 6 ? 17 : 1) * (s.adaptive ? 2 : 1) / max(choice.gflops, 1)
         }
+        if !choice.smart, choice.whereTo != "cloud", let m = manual { return Double(m.estSeconds) }
         return gflop(effectiveModel).map { $0 / max(choice.gflops, 1) }
     }
 
@@ -262,6 +299,7 @@ struct UpscaleSheet: View {
 
     private var fidelityBlurb: String {
         switch choice.fidelity {
+        case "auto": return "Picked from the photo: Natural for noisy or compressed pictures, Faithful for portraits and clean drawn art."
         case "off": return "The network's output as-is."
         case "faithful": return "Every output pixel pulled to agree with your photo as closely as possible."
         default: return "Keeps the AI's sharp edges, restores colour and shading it flattened, removes halos."

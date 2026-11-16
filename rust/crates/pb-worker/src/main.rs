@@ -19,7 +19,7 @@ use pb_core::pipeline::Settings;
 use pb_core::resample::{resize, Filter};
 use pb_core::stream::{self, Limits};
 use pb_core::fusion::{Stack, Upscaler};
-use pb_core::{classify, Image};
+use pb_core::Image;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -54,6 +54,9 @@ struct JobSettings {
     /// Photo + Clean fused per pixel by source texture.
     #[serde(default)]
     adaptive: bool,
+    /// Shrink to the real resolution first: 0 = Auto, 1 = off.
+    #[serde(default = "full")]
+    prescale: f32,
 }
 
 fn full() -> f32 {
@@ -418,16 +421,39 @@ fn run_job(app: &App, id: &str, cancel: Arc<AtomicBool>, engines: &mut Option<(S
     let img = Image::open(&dir.join("input").to_string_lossy())?;
     make_thumb(&img, &dir.join("input_thumb.jpg"));
     let s = &job.settings;
-    // The server has compute to spare: on Auto, the best model for the
-    // content with no size budget, and adaptive fusion for photos.
-    let (model, adaptive) = if s.model == "auto" {
-        match classify::content_kind(&img) {
-            "anime" => ("anime".to_string(), false),
-            _ => ("photo".to_string(), true),
-        }
-    } else {
-        (s.model.clone(), s.adaptive)
-    };
+    // Settings left on Auto (model "auto", clarity "auto", detail < 0,
+    // quality 0, prescale 0) are decided from the photo with the server's
+    // budget: no time limit, so Adaptive photos and more quality passes.
+    let any_auto = s.model == "auto" || s.fidelity == "auto" || s.detail < 0.0 || s.ensemble == 0 || s.prescale <= 0.0;
+    let mut s = s.clone();
+    if any_auto {
+        let m = pb_core::analyze::measure(&img);
+        let photo = s.model == "photo";
+        let fx = pb_core::analyze::Fixed {
+            model: (s.model != "auto").then(|| s.model.clone()),
+            scale: (s.scale >= 1.0).then_some(s.scale),
+            fidelity: (s.fidelity != "auto").then(|| s.fidelity.clone()),
+            detail: (s.detail >= 0.0).then_some(s.detail),
+            ensemble: (s.ensemble > 0).then_some(s.ensemble as usize),
+            denoise: (s.model == "fast").then_some(s.denoise),
+            realism: photo.then_some(s.realism),
+            adaptive: photo.then_some(s.adaptive),
+            prescale: (s.prescale > 0.0).then_some(s.prescale),
+        };
+        let b = pb_core::analyze::Budget { gflops: 150.0, max_seconds: 1e9, max_output_mp: (app.max_px as f32 / 1e6), cloud: true };
+        let r = pb_core::analyze::recommend_fixed(&m, b, &fx);
+        eprintln!("job {id}: auto -> {} {}x prescale {:.2} {} detail {:.2} quality {} adaptive {} ({})", r.model, r.scale, r.prescale, r.fidelity, r.detail, r.ensemble, r.adaptive, r.summary);
+        s.model = r.model;
+        s.scale = r.scale;
+        s.fidelity = r.fidelity;
+        s.detail = r.detail;
+        s.ensemble = r.ensemble as u32;
+        s.denoise = r.denoise;
+        s.realism = r.realism;
+        s.adaptive = r.adaptive;
+        s.prescale = r.prescale;
+    }
+    let (model, adaptive) = (s.model.clone(), s.adaptive);
     let realism = s.realism.clamp(0.0, 1.0);
     let key = format!("{model}:{:.2}:{realism:.2}:{adaptive}", s.denoise);
     if engines.as_ref().map(|(k, _)| k != &key).unwrap_or(true) {
@@ -445,6 +471,7 @@ fn run_job(app: &App, id: &str, cancel: Arc<AtomicBool>, engines: &mut Option<(S
         fidelity,
         realism,
         adaptive,
+        prescale: if s.prescale > 0.0 { s.prescale.min(1.0) } else { 1.0 },
         detail: s.detail.clamp(0.0, 1.0),
         tile: 192,
         pad: 16,

@@ -31,6 +31,10 @@ pub struct Settings {
     /// (`fusion`). About twice the compute.
     #[serde(default)]
     pub adaptive: bool,
+    /// Shrink the input to this fraction first (its real resolution, see
+    /// `analyze`); the output size still follows `scale` of the original.
+    #[serde(default = "full")]
+    pub prescale: f32,
 }
 
 fn full() -> f32 {
@@ -43,7 +47,7 @@ fn one() -> usize {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { scale: 4.0, fidelity: Fidelity::Natural, detail: 0.35, tile: 128, pad: 16, ensemble: 1, realism: 1.0, adaptive: false }
+        Settings { scale: 4.0, fidelity: Fidelity::Natural, detail: 0.35, tile: 128, pad: 16, ensemble: 1, realism: 1.0, adaptive: false, prescale: 1.0 }
     }
 }
 

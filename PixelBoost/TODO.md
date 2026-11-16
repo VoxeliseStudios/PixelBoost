@@ -67,3 +67,13 @@ operation is a call into PixelBoostCore (Rust).
       thermal throttling on long GPU runs, check memory on 6 GB iPhones
       (photo model, 128 px tiles ≈ 0.4 GB of GPU buffers).
 - [ ] Show which backend ran in the result card (`UpscaleOutcome.backend`).
+
+## 5.5 (2026-11-16)
+
+- [x] Quality: Auto / Standard / High / Max (`up.qualityA`, 0 = Auto);
+      Clarity: Auto / Raw AI / Natural / Faithful (`up.fidelityA`); Auto
+      detail toggle (`up.detailAuto`). Auto is the default.
+- [x] `SmartCache.resolve` → Rust `resolve()`; manual view lists what Auto
+      picked, the content kind and the real resolution; runs and cloud jobs
+      use the resolved settings (incl. prescale).
+- [ ] On device: check the Auto notes update when switching photo / where.

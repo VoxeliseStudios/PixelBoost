@@ -164,6 +164,15 @@ Models/pbnn/       converted models (fp16 .pbnn)
   1.4x, CPU left free); fusion +0.5 dB PSNR over photo with ~the same
   texture level. Details in rust/TODO.md.
 
+## 5.5 — Auto everything, real-resolution analysis (2026-11-16)
+
+- [x] Analyzer finds the real resolution of blown-up images and runs the
+      network on it (prescale); drawn-vs-photo judged at that resolution
+      from ink lines / palette / flat fills (no more photos read as anime).
+- [x] Auto chips for Quality and Clarity and Auto detail, resolved from the
+      photo in Rust (app, FFI fallback and cloud worker). Details and the
+      12-meme test in rust/TODO.md.
+
 ## Bench numbers (26 gallery images, 256px GT crop -> 64px -> 4x)
 
 Final settings (`pixelboost eval testimages/src OUT --crop 256`):

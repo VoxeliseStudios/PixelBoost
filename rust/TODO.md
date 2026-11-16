@@ -96,3 +96,38 @@ Overall tracker: ../RUST-REMAKE.md
       (worker builds pb-core without `gpu` for now).
 - [ ] Fusion map v2: a small learned texture/skin classifier instead of the
       hand-tuned energy + YCbCr mask.
+
+## 5.5 — Auto quality / clarity / detail, the analyzer really reads the photo (2026-11-16)
+
+- [x] Found: `classify` called every soft or compressed photo "anime" (it
+      only counted flat 3x3 neighbourhoods, which blurry photos also have) —
+      all 12 test memes, incl. 6 real photos, read as drawn art.
+- [x] Real resolution (`classify::effective_scale`): shrink a native crop by
+      1.25..4x and scale back; while that loses < 1.2 levels RMS the pixels
+      hold nothing finer. Memes blown up 3-4x are found (Bernie 4x, airport
+      4x, reaper 3x, Tom & Jerry 3x); sharp art/photos stay 1x (38 images).
+- [x] Prescale: the network runs on the real detail (`Settings.prescale`,
+      stream shrinks first, output size unchanged). Two model passes only
+      when blown up >= 3x or the 4x intermediate stays <= 2.5 MP, else the
+      factor is capped at 6x (SpongeBob 347 s -> 68 s).
+- [x] New drawn-vs-photo evidence at the real resolution (`classify::ink`):
+      continuous thin dark lines (noise-aware) over a concentrated palette,
+      or pixel-flat fills (+ grain-free when there are no lines). No photo
+      of the 38 labelled images reads as drawn; soft cartoons whose lines
+      washed out go to the photo models (fine on cartoons, unlike the
+      reverse). Tried and rejected: global flat/texture stats, palette
+      alone, model probes scored by PSNR / texture — they overlap.
+- [x] `analyze::recommend_fixed`: decide only the fields left on Auto
+      around the user's choices; FFI `resolve()`, `upscale()` resolves any
+      Auto left, the worker resolves with the server budget.
+- [x] App: Quality / Clarity have an Auto chip and Detail an Auto toggle
+      (new defaults); the manual view shows what Auto picked and the real
+      resolution; learned GFLOP/s accounts for prescale.
+- Test (12 user memes, GPU here, 3 min budget, `upscale --smart`): crisp
+  lines on the cartoons (#1 #2 #5), sharper faces (#6), rebuilt texture
+  (#8), #3 sharp after the cost-based cap; #7 stays soft (Clean on a 4x
+  blown-up face; Adaptive on the cloud), #12 still soft (its fine detail is
+  sharpening halos, which read as real detail).
+- [ ] #12-type images: halos from an earlier upscaler fool the real-
+      resolution test; detect ringing separately.
+- [ ] A learned content classifier (semantics) would catch soft cartoons.
