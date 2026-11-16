@@ -131,3 +131,4 @@ Overall tracker: ../RUST-REMAKE.md
 - [ ] #12-type images: halos from an earlier upscaler fool the real-
       resolution test; detect ringing separately.
 - [ ] A learned content classifier (semantics) would catch soft cartoons.
+- [x] Released as v5.5.0 (2026-11-16): signed IPA verified from the release and the AltStore source (identical), repo back to private.
