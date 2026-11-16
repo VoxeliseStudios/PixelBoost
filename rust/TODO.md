@@ -57,6 +57,14 @@ Overall tracker: ../RUST-REMAKE.md
       a representative conv, keeps the fastest + GPU and CPU GFLOP/s, cached
       per device (`PB_GPU_TUNE=file`, app: Caches/pixelboost-gpu-tune.json).
       Auto stays on the CPU when the GPU is not 10% faster.
+- [x] Metal: the first CI run on Apple's GPU gave garbage — threads wrote
+      different lanes of one workgroup vec4, which Apple compiles to a
+      read-modify-write of the whole vector. Shared input tile is now a
+      scalar array; Metal matches the CPU to ~3e-6 (CI runner GPU).
+- [x] Self-check: a GPU is used only after it reproduces a random RRDB /
+      SRVGG on the CPU (`pb_gpu::check`); reason shown in Settings.
+- [x] Released as v5.4.0 (2026-11-16): IPA signed (app + 2 extensions with
+      the App Group), AltStore source serves it, repo back to private.
 - [x] Failure handling: validation / OOM error scopes, panics caught, device
       loss -> CPU fallback network (rebuilt from the model file), `Gpu::reset`
       when the app returns; pause while backgrounded.
