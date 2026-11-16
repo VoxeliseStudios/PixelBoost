@@ -53,6 +53,10 @@ pub struct Recommendation {
     pub detail: f32,
     pub denoise: f32,
     pub ensemble: usize,
+    /// Photo model texture strength (weight interpolation with Clean).
+    pub realism: f32,
+    /// Photo + Clean fused per pixel by source texture (2x compute).
+    pub adaptive: bool,
     /// Expected run time on the budget's device (seconds).
     pub est_seconds: f32,
     /// Short human-readable reasons, most important first.
@@ -380,7 +384,6 @@ pub fn recommend(m: &Measures, b: Budget) -> Recommendation {
         }
         "fast"
     } else if portrait {
-        why.push(format!("Skin tones fill {}% of the middle → Clean model (no invented skin texture)", pct(m.skin)));
         "clean"
     } else if scale <= 2.0 {
         why.push("Clean photo at 2× → Native 2× network".into());
@@ -393,11 +396,31 @@ pub fn recommend(m: &Measures, b: Budget) -> Recommendation {
     // ---- budget: fall back to a cheaper network when the phone would take
     // too long (the cloud has no such limit).
     let est = |model: &str, ens: usize| -> f32 { (gflop(model, m.width, m.height, scale, ens) / b.gflops.max(1.0) as f64) as f32 };
-    if !b.cloud && est(model, 1) > b.max_seconds {
+    // Adaptive fusion (Photo where the source has texture, Clean on skin
+    // and flat areas) costs two networks: use it when it fits the budget.
+    let mut adaptive = false;
+    let mut realism = 1.0f32;
+    let fits_fused = |e: usize| b.cloud || est("photo", 2 * e) <= b.max_seconds;
+    if portrait {
+        if fits_fused(1) {
+            model = "photo";
+            adaptive = true;
+            realism = 0.8;
+            why.push(format!("Skin tones fill {}% of the middle → Adaptive: real texture on hair and clothes, faithful skin", pct(m.skin)));
+        } else {
+            why.push(format!("Skin tones fill {}% of the middle → Clean model (no invented skin texture)", pct(m.skin)));
+        }
+    } else if model == "photo" && (b.cloud || m.flat > 0.3) && fits_fused(1) {
+        adaptive = true;
+        why.push(if m.flat > 0.3 { "Large smooth areas (sky, walls) → Adaptive keeps them clean while texture gets rebuilt".to_string() } else { "Adaptive: texture rebuilt only where the photo has it".to_string() });
+    }
+    let cost = |model: &str, ens: usize, ad: bool| if ad { est("photo", 2 * ens) } else { est(model, ens) };
+    if !b.cloud && cost(model, 1, adaptive) > b.max_seconds {
         let cheaper = if anime { "lineart" } else { "fast" };
         if cheaper != model {
-            why.push(format!("{} would take ~{} on this iPhone → {} model instead", models::find(model).map(|i| i.name).unwrap_or(model), fmt_secs(est(model, 1)), models::find(cheaper).map(|i| i.name).unwrap_or(cheaper)));
+            why.push(format!("{} would take ~{} on this iPhone → {} model instead", models::find(model).map(|i| i.name).unwrap_or(model), fmt_secs(cost(model, 1, adaptive)), models::find(cheaper).map(|i| i.name).unwrap_or(cheaper)));
             model = cheaper;
+            adaptive = false;
         }
     }
 
@@ -438,7 +461,7 @@ pub fn recommend(m: &Measures, b: Budget) -> Recommendation {
     } else {
         for e in [8usize, 2] {
             let limit = if e == 8 { 0.25 } else { 0.5 };
-            if est(model, e) <= b.max_seconds * limit {
+            if cost(model, e, adaptive) <= b.max_seconds * limit {
                 ensemble = e;
                 break;
             }
@@ -454,7 +477,7 @@ pub fn recommend(m: &Measures, b: Budget) -> Recommendation {
         why.push("Dark photo but clean — no denoise needed".into());
     }
 
-    let est_seconds = if b.cloud { 0.0 } else { est(model, ensemble) };
+    let est_seconds = if b.cloud { 0.0 } else { cost(model, ensemble, adaptive) };
     let what = if anime {
         "Drawn art"
     } else if very_noisy {
@@ -471,8 +494,15 @@ pub fn recommend(m: &Measures, b: Budget) -> Recommendation {
         "Clean photo"
     };
     let name = models::find(model).map(|i| i.name).unwrap_or(model);
-    let summary = format!("{what} · {}× · {name}{}", scale as u32, if denoise > 0.0 && model == "fast" { " + denoise" } else { "" });
-    Recommendation { model: model.into(), scale, fidelity: fidelity.into(), detail, denoise, ensemble, est_seconds, reasons: why, summary }
+    let extra = if denoise > 0.0 && model == "fast" {
+        " + denoise"
+    } else if adaptive {
+        " · Adaptive"
+    } else {
+        ""
+    };
+    let summary = format!("{what} · {}× · {name}{extra}", scale as u32);
+    Recommendation { model: model.into(), scale, fidelity: fidelity.into(), detail, denoise, ensemble, realism, adaptive, est_seconds, reasons: why, summary }
 }
 
 fn fmt_secs(s: f32) -> String {
@@ -590,5 +620,25 @@ mod tests {
         assert_eq!(fast.model, "photo");
         assert_eq!(slow.model, "fast");
         assert!(fast.ensemble >= 2);
+        assert!(!slow.adaptive);
+    }
+
+    #[test]
+    fn portraits_go_adaptive_when_it_fits() {
+        let mut m = measure(&scene(64, 64));
+        m.kind = "photo";
+        m.noise = 0.5;
+        m.blocking = 0.0;
+        m.skin = 0.4;
+        m.width = 900;
+        m.height = 900;
+        let gpu = recommend(&m, Budget { gflops: 2_000.0, ..Budget::default() });
+        assert_eq!(gpu.model, "photo");
+        assert!(gpu.adaptive && gpu.realism < 1.0);
+        let slow = recommend(&m, Budget { gflops: 20.0, ..Budget::default() });
+        assert!(!slow.adaptive);
+        assert_ne!(slow.model, "photo");
+        let cloud = recommend(&m, Budget { cloud: true, ..Budget::default() });
+        assert!(cloud.adaptive);
     }
 }

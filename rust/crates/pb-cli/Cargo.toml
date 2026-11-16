@@ -12,5 +12,6 @@ path = "src/main.rs"
 [dependencies]
 pb-nn = { path = "../pb-nn" }
 pb-core = { path = "../pb-core" }
+pb-gpu = { path = "../pb-gpu" }
 rayon.workspace = true
 serde_json.workspace = true

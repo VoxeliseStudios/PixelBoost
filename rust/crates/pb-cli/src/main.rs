@@ -15,7 +15,8 @@ fn usage() -> ! {
   upscale <in> <out> [--model id] [--scale s] [--fidelity off|natural|faithful]
           [--detail 0..1] [--denoise 0..1] [--tile n] [--models dir]
   raw <model> <in> <out>               model output only, no post-processing
-  bench <model> [size]                 time one forward pass
+  bench <model> [size]                 time one forward pass (PB_BACKEND=cpu|gpu)
+  gpu-tune [cache.json]                tune the GPU kernels for this device
   eval <image dir> <out dir> [--models dir] [--crop n] [--list a,b] [--only ids]
                                        degrade -> upscale -> compare with original
   edit <in> <out> <op json | @file.json | preset:id>   run an editing op (timed)
@@ -107,8 +108,8 @@ fn main() {
                 let (x, y) = ((i % n) as f32, (i / n) as f32);
                 *p = [(x * 0.1).sin() * 0.5 + 0.5, (y * 0.07).cos() * 0.5 + 0.5, ((x + y) * 0.05).sin() * 0.5 + 0.5, 1.0];
             }
-            println!("kernel: {}", pb_nn::conv::kernel_name());
-            for _ in 0..2 {
+            println!("backend: {}", eng.backend());
+            for _ in 0..3 {
                 let t = Instant::now();
                 eng.run(&img, TileOptions { tile: n, pad: 0 }, &mut |_| true);
                 let dt = t.elapsed().as_secs_f64();
@@ -118,6 +119,17 @@ fn main() {
             Ok(())
         })(),
         "eval" if args.len() >= 3 => eval::eval_cmd(&args),
+        "gpu-tune" => (|| {
+            let gpu = pb_gpu::Gpu::get().ok_or("no GPU")?;
+            println!("device: {}", gpu.describe());
+            let t = std::time::Instant::now();
+            let r = pb_gpu::tune::autotune(&gpu)?;
+            println!("{}\n(tuned in {:.1}s)", serde_json::to_string_pretty(&r).unwrap(), t.elapsed().as_secs_f64());
+            if let Some(p) = args.get(1) {
+                std::fs::write(p, serde_json::to_vec_pretty(&r).unwrap()).map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        })(),
         "edit" if args.len() >= 4 => (|| {
             let spec = &args[3];
             let json = if let Some(id) = spec.strip_prefix("preset:") {

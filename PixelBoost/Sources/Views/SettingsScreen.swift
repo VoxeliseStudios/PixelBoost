@@ -6,6 +6,8 @@ struct SettingsScreen: View {
     @AppStorage("pb.apiKey") private var apiKey = ""
     @AppStorage("pb.telemetry") private var telemetry = true
     @AppStorage("pb.replaceMethod") private var replaceMethod = PhotoLibrary.Method.edit.rawValue
+    @AppStorage("pb.compute") private var compute = "auto"
+    @State private var computeInfo: ComputeInfo?
     @State private var health: String?
     @State private var exports: [StoredImage] = []
     @Environment(\.dismiss) private var dismiss
@@ -13,6 +15,25 @@ struct SettingsScreen: View {
     var body: some View {
         NavigationStack {
             Form {
+                Section {
+                    Picker("Run networks on", selection: $compute) {
+                        Text("Auto").tag("auto")
+                        Text("GPU").tag("gpu")
+                        Text("CPU").tag("cpu")
+                    }
+                    .pickerStyle(.segmented)
+                    if let c = computeInfo {
+                        LabeledContent("GPU", value: c.gpu ?? "Not available")
+                        LabeledContent("CPU", value: c.cpuKernel)
+                        if c.gpuGflops > 0 {
+                            LabeledContent("Measured", value: String(format: "GPU %.0f · CPU %.0f GFLOP/s", c.gpuGflops, c.cpuGflops))
+                        }
+                    } else {
+                        HStack { ProgressView(); Text("Measuring this iPhone…").font(.caption).foregroundStyle(Theme.dim) }
+                    }
+                } header: { Text("Compute") } footer: {
+                    Text(computeFooter)
+                }
                 Section("Engine") {
                     LabeledContent("Inference", value: "PixelBoost NN (Rust)")
                     LabeledContent("Kernel", value: Core.engine.kernel())
@@ -66,7 +87,26 @@ struct SettingsScreen: View {
             .navigationTitle("Settings")
             .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
             .onChange(of: server) { _, _ in Core.server.configure(baseUrl: server, apiKey: Prefs.apiKey) }
+            .onChange(of: compute) { _, v in Core.engine.setCompute(mode: v); loadCompute() }
+            .task { loadCompute() }
             .onChange(of: apiKey) { _, _ in Core.server.configure(baseUrl: server, apiKey: Prefs.apiKey) }
+        }
+    }
+
+    private var computeFooter: String {
+        guard let c = computeInfo else { return "PixelBoost's own GPU kernels (Metal) run the upscaling networks; the first visit measures this iPhone once." }
+        if c.gpu == nil { return "No usable GPU — everything runs on the CPU kernels." }
+        switch compute {
+        case "cpu": return "Networks run on the CPU kernels only."
+        case "gpu": return "Networks always run on the GPU (Metal). If the app goes to the background mid-run, the rest continues on the CPU."
+        default: return c.autoUsesGpu ? "Auto runs networks on the GPU (faster here) and falls back to the CPU in the background." : "Auto stays on the CPU: it measured faster than the GPU on this device."
+        }
+    }
+
+    private func loadCompute() {
+        Task.detached(priority: .userInitiated) {
+            let c = Core.engine.computeInfo()
+            await MainActor.run { computeInfo = c }
         }
     }
 

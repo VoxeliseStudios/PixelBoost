@@ -20,6 +20,8 @@ rust/
   crates/pb-core   engine: image I/O, resampling, tiled model runner (dedups
                    identical tiles), fidelity (back-projection + halo guard),
                    halo-free detail boost, auto model pick, metrics, pipeline
+  crates/pb-gpu    GPU backend: own WGSL implicit-GEMM conv kernels on wgpu
+                   (Metal on iPhone, Vulkan on Linux), autotuned per device
   crates/pb-cli    `pixelboost` CLI: convert, upscale, raw, bench, eval
 Models/pbnn/       converted models (fp16 .pbnn)
 ```
@@ -50,7 +52,7 @@ Models/pbnn/       converted models (fp16 .pbnn)
 - [x] Repo made public 2026-11-08 so macOS CI runs (billing had blocked it)
 - [x] Auto pick is compute-budgeted: photo net up to 1 MP then "fast";
       anime net up to 4 MP then "lineart"
-- [ ] GPU backend (wgpu -> Metal) for faster on-device runs of the 23-block models
+- [x] GPU backend (pb-gpu: wgpu -> Metal / Vulkan, own kernels) — 5.4
 - [ ] Own segmentation model for Cutout (currently Vision's subject mask)
 - [ ] Own render-denoise model (old app had OIDN via Core ML; not ported yet)
 - [ ] Scripted (Lua) filters from the old app: not ported; replace with a
@@ -142,6 +144,26 @@ Models/pbnn/       converted models (fp16 .pbnn)
 - [x] Upscale sheet: Smart card (summary, measured noise/blocks/sharpness,
       reasons, longest wait 1/3/10 min/no limit, "Customize").
 
+## 5.4 — GPU engine, Adaptive texture (2026-11-16)
+
+- [x] `pb-gpu`: PixelBoost's own GPU kernels. Implicit-GEMM 3x3 conv,
+      generated per tile shape as unrolled WGSL, fused epilogues, nearest
+      upsample folded into the conv (no 2x/4x upsampled maps in memory),
+      SRVGG tail; matches the CPU networks to ~1e-6. Short submissions
+      (GPU watchdogs), error scopes + CPU fallback, paused in the background.
+- [x] On-device autotune: 11 tile shapes per block width timed on first use,
+      cached per GPU; Auto keeps the CPU where the GPU isn't faster.
+- [x] Realism (photo <-> clean weight interpolation) and Adaptive (`fusion`:
+      photo + clean mixed per pixel by the source's texture map, skin and
+      flat areas faithful). Analyzer uses Adaptive for portraits and flat
+      scenes when it fits the budget; cloud Auto photos always.
+- [x] App: Settings › Compute (Auto / GPU / CPU, measured speeds), upscale
+      sheet Texture card, cloud jobs carry the new settings.
+- [x] Eval: `texture_match` metric, `--variants`.
+- Numbers: GPU 286-295 GFLOP/s vs CPU 204-213 on this PC (Radeon 610M iGPU,
+  1.4x, CPU left free); fusion +0.5 dB PSNR over photo with ~the same
+  texture level. Details in rust/TODO.md.
+
 ## Bench numbers (26 gallery images, 256px GT crop -> 64px -> 4x)
 
 Final settings (`pixelboost eval testimages/src OUT --crop 256`):
@@ -172,7 +194,10 @@ cargo build --release
 ./target/release/pixelboost convert-all weights-src ../Models/pbnn
 ./target/release/pixelboost upscale in.jpg out.png --model auto
 ./target/release/pixelboost eval testimages/src /tmp/eval --crop 256 [--jpeg 85]
-./target/release/pixelboost bench photo 96
+./target/release/pixelboost bench photo 96            # PB_BACKEND=cpu|gpu, PB_GPU_PROFILE=1
+./target/release/pixelboost gpu-tune tune.json
+./target/release/pixelboost upscale in.jpg out.png --model photo --adaptive [--realism 0.8]
+./target/release/pixelboost eval testimages/src /tmp/eval --only photo,clean --variants r0.5,fusion
 ./target/release/pixelboost analyze testimages/src/* [-v] [--gflops 40] [--seconds 180] [--cloud]
 ./target/release/pixelboost shape in.jpg out.png heart '[{"style":"neon","width":0.03}]'
 ./target/release/pixelboost replace original.heic upscaled.png out   # -> out.jpg

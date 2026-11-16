@@ -10,7 +10,7 @@ name = "pixelboost-worker"
 path = "src/main.rs"
 
 [dependencies]
-pb-core = { path = "../pb-core" }
+pb-core = { path = "../pb-core", default-features = false }
 axum = { version = "0.8", features = ["multipart"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "fs", "io-util", "signal"] }
 tokio-util = { version = "0.7", features = ["io"] }

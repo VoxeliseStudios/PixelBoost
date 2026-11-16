@@ -15,11 +15,15 @@ path = "uniffi-bindgen.rs"
 required-features = ["bindgen"]
 
 [features]
+default = ["gpu"]
 bindgen = ["uniffi/cli"]
+# GPU inference (Metal on iOS).
+gpu = ["dep:pb-gpu", "pb-core/gpu"]
 
 [dependencies]
-pb-core = { path = "../pb-core" }
+pb-core = { path = "../pb-core", default-features = false }
 pb-nn = { path = "../pb-nn" }
+pb-gpu = { path = "../pb-gpu", optional = true }
 uniffi = { version = "=0.28.3" }
 serde_json.workspace = true
 thiserror = "2"

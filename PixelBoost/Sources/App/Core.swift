@@ -6,7 +6,11 @@ import UIKit
 enum Core {
     static let engine: PixelBoostCore = {
         let dir = Bundle.main.resourceURL!.appendingPathComponent("pbnn").path
-        return PixelBoostCore(modelsDir: dir)
+        let core = PixelBoostCore(modelsDir: dir)
+        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        core.setCacheDir(dir: caches.path)
+        core.setCompute(mode: UserDefaults.standard.string(forKey: "pb.compute") ?? "auto")
+        return core
     }()
 
     static let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]

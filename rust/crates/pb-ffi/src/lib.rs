@@ -57,6 +57,11 @@ pub struct UpscaleSettings {
     pub tile: u32,
     /// Output cap in megapixels (0 = default 120).
     pub max_output_mp: f32,
+    /// Photo model texture strength, 0..1 (1 = full GAN texture). Below 1
+    /// the colours are always locked to the original (Natural clarity).
+    pub realism: f32,
+    /// Photo model: also run Clean and mix per pixel by source texture.
+    pub adaptive: bool,
 }
 
 #[derive(uniffi::Record, Clone)]
@@ -71,6 +76,25 @@ pub struct UpscaleOutcome {
     pub passes: u32,
     /// The output was made smaller than asked to fit the size cap.
     pub capped: bool,
+    /// Where the networks ran ("gpu: Apple A17 Pro GPU (Metal)").
+    pub backend: String,
+    /// Photo + Clean fusion ran (twice the network compute).
+    pub adaptive: bool,
+}
+
+#[derive(uniffi::Record, Clone)]
+pub struct ComputeInfo {
+    /// "auto", "cpu" or "gpu".
+    pub mode: String,
+    /// The GPU PixelBoost can use, if any.
+    pub gpu: Option<String>,
+    /// SIMD kernel of the CPU path.
+    pub cpu_kernel: String,
+    /// Measured on the tuning conv (0 when not tuned yet).
+    pub gpu_gflops: f64,
+    pub cpu_gflops: f64,
+    /// Whether Auto runs networks on the GPU.
+    pub auto_uses_gpu: bool,
 }
 
 #[derive(uniffi::Record, Clone)]
@@ -168,7 +192,60 @@ impl PixelBoostCore {
     }
 
     pub fn kernel(&self) -> String {
-        pb_nn::conv::kernel_name().into()
+        match pb_core::gpu_name() {
+            Some(g) if pb_core::backend() != pb_core::Backend::Cpu => format!("GPU: {g} · CPU: {}", pb_nn::conv::kernel_name()),
+            _ => pb_nn::conv::kernel_name().into(),
+        }
+    }
+
+    /// "auto" (GPU when it is faster than the CPU), "gpu" or "cpu".
+    pub fn set_compute(&self, mode: String) {
+        pb_core::set_backend(match mode.as_str() {
+            "cpu" => pb_core::Backend::Cpu,
+            "gpu" => pb_core::Backend::Gpu,
+            _ => pb_core::Backend::Auto,
+        });
+        self.cache.lock().unwrap().clear();
+    }
+
+    /// GPU + CPU details. The first call on a device tunes the GPU kernels
+    /// (a second or two) and caches the result in `tune_cache_dir`.
+    pub fn compute_info(&self) -> ComputeInfo {
+        let gpu = pb_core::gpu_name();
+        let (g, c) = pb_core::gpu_speed().unwrap_or((0.0, 0.0));
+        ComputeInfo {
+            mode: match pb_core::backend() {
+                pb_core::Backend::Auto => "auto",
+                pb_core::Backend::Cpu => "cpu",
+                pb_core::Backend::Gpu => "gpu",
+            }
+            .into(),
+            auto_uses_gpu: gpu.is_some() && (g == 0.0 || g > c * 1.1),
+            gpu,
+            cpu_kernel: pb_nn::conv::kernel_name().into(),
+            gpu_gflops: g,
+            cpu_gflops: c,
+        }
+    }
+
+    /// Where to cache the per-device GPU tuning (call once at launch).
+    pub fn set_cache_dir(&self, dir: String) {
+        pb_core::set_gpu_tune_cache(&PathBuf::from(dir).join("pixelboost-gpu-tune.json"));
+    }
+
+    /// iOS does not allow GPU work in the background: pause it when the
+    /// app leaves the foreground (running jobs continue on the CPU) and
+    /// resume when it returns. Resuming also recovers from a lost GPU.
+    pub fn set_gpu_paused(&self, paused: bool) {
+        #[cfg(feature = "gpu")]
+        {
+            pb_gpu::set_paused(paused);
+            if !paused && pb_gpu::Gpu::reset() {
+                self.cache.lock().unwrap().clear();
+            }
+        }
+        #[cfg(not(feature = "gpu"))]
+        let _ = paused;
     }
 
     /// Which model Auto would use for this image.
@@ -202,31 +279,39 @@ impl PixelBoostCore {
         let img = Image::open(&input_path)?;
         let model = if settings.model == "auto" { classify::pick_model(&img).to_string() } else { settings.model.clone() };
         let denoise = if model == "fast" && settings.denoise > 0.0 { Some(settings.denoise) } else { None };
-        let key = format!("{model}:{:.2}", denoise.unwrap_or(0.0));
-        let engine = {
+        let realism = if settings.realism > 0.0 { settings.realism.min(1.0) } else { 1.0 };
+        let stack = pb_core::fusion::Stack::build(&model, denoise, realism, settings.adaptive, &mut |id, t| {
+            let key = format!("{id}:{}", t.key());
             let mut c = self.cache.lock().unwrap();
             if let Some(e) = c.get(&key) {
-                e.clone()
-            } else {
-                // Keep at most two networks resident (they are large).
-                if c.len() >= 2 {
-                    c.clear();
-                }
-                let e = Arc::new(Engine::load(&self.models_dir, &model, denoise)?);
-                c.insert(key, e.clone());
-                e
+                return Ok(e.clone());
             }
-        };
+            // Keep at most three networks resident (they are large;
+            // adaptive needs two at once).
+            if c.len() >= 3 {
+                c.clear();
+            }
+            let e = Arc::new(Engine::load_tuned(&self.models_dir, id, t)?);
+            c.insert(key, e.clone());
+            Ok(e)
+        })?;
+        let mut fidelity = Fidelity::parse(&settings.fidelity).unwrap_or(Fidelity::Natural);
+        if model == "photo" && realism < 0.999 && !settings.adaptive && fidelity == Fidelity::Off {
+            // Interpolated weights can drift in colour; clarity locks it.
+            fidelity = Fidelity::Natural;
+        }
         let st = Settings {
             scale: settings.scale,
-            fidelity: Fidelity::parse(&settings.fidelity).unwrap_or(Fidelity::Natural),
+            fidelity,
             detail: settings.detail.clamp(0.0, 1.0),
             tile: settings.tile.clamp(32, 512) as usize,
             pad: 16,
             ensemble: settings.ensemble.max(1) as usize,
+            realism,
+            adaptive: settings.adaptive,
         };
         let lim = pb_core::stream::Limits { max_output_px: if settings.max_output_mp > 0.0 { (settings.max_output_mp as f64 * 1e6) as usize } else { 120_000_000 } };
-        let res = pb_core::stream::upscale(&engine, &img, &st, lim, &mut |e| {
+        let res = pb_core::stream::upscale(&stack, &img, &st, lim, &mut |e| {
             let [x, y, w, h] = e.rect;
             let rgba = if w > 0 { e.pixels.data.clone() } else { Vec::new() };
             let (pw, ph) = (e.pixels.w as u32, e.pixels.h as u32);
@@ -242,12 +327,14 @@ impl PixelBoostCore {
             output_path,
             width: out.w as u32,
             height: out.h as u32,
-            model: rep.model,
+            model: model.clone(),
             seconds: rep.seconds,
             fidelity_db: rep.fidelity_db,
             tiles: rep.tiles as u32,
             passes: rep.passes as u32,
             capped,
+            backend: stack.backend(),
+            adaptive: matches!(stack, pb_core::fusion::Stack::Fused(_)),
         })
     }
 

@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TensorF32 {
     pub shape: Vec<usize>,
     pub data: Vec<f32>,

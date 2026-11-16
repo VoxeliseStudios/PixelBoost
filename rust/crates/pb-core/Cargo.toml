@@ -7,9 +7,15 @@ license.workspace = true
 
 [dependencies]
 pb-nn = { path = "../pb-nn" }
+pb-gpu = { path = "../pb-gpu", optional = true }
 rayon.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 png = "0.18"
 ab_glyph = "0.2.32"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "exr", "tiff", "bmp", "gif"] }
+
+[features]
+default = ["gpu"]
+# GPU inference (wgpu: Metal / Vulkan). Without it everything runs on pb-nn's CPU kernels.
+gpu = ["dep:pb-gpu"]

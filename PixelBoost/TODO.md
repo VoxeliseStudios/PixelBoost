@@ -51,3 +51,19 @@ operation is a call into PixelBoostCore (Rust).
       set; offer the limited-library picker when `notFound`.
 - [ ] Export sheet could offer "Replace original" for edited photos too.
 - [ ] Shape crop: drag on the canvas to rotate the shape (slider only now).
+
+## 5.4 — GPU engine, Adaptive texture (2026-11-16)
+
+- [x] Settings › Compute: Auto / GPU / CPU (`pb.compute`), GPU name and the
+      measured GPU vs CPU speed (`computeInfo()`, first visit tunes once).
+- [x] `Core.engine` sets the tuning cache (Caches/) and the compute mode at
+      launch; `PixelBoostApp` pauses GPU work outside `.active` (iOS forbids
+      background GPU work — running jobs continue on the CPU).
+- [x] Upscale sheet › Texture card (Photo model): Adaptive toggle + Realism
+      slider; Smart line shows them; estimates double for Adaptive; learned
+      GFLOP/s accounts for Adaptive runs (`UpscaleOutcome.adaptive`).
+- [x] Cloud jobs send `realism` / `adaptive`.
+- [ ] On device: compare GPU vs CPU times on the History entries, watch for
+      thermal throttling on long GPU runs, check memory on 6 GB iPhones
+      (photo model, 128 px tiles ≈ 0.4 GB of GPU buffers).
+- [ ] Show which backend ran in the result card (`UpscaleOutcome.backend`).

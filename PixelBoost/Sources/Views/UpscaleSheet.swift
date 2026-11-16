@@ -106,6 +106,8 @@ struct UpscaleSheet: View {
         let w = Int(Float(a.width) * s.scale), h = Int(Float(a.height) * s.scale)
         var parts = ["\(Int(s.scale))× → \(w) × \(h)", UpscaleChoice.name(s.model), s.fidelity.capitalized, "detail \(Int(s.detail * 100))%"]
         if s.denoise > 0 { parts.append("denoise \(Int(s.denoise * 100))%") }
+        if s.model == "photo", s.adaptive { parts.append("Adaptive") }
+        if s.model == "photo", s.realism < 0.995 { parts.append("realism \(Int(s.realism * 100))%") }
         if s.ensemble > 1 { parts.append(s.ensemble >= 8 ? "Max" : "High") }
         if choice.whereTo != "cloud", a.estSeconds > 0 { parts.append("≈ \(formatDuration(Double(a.estSeconds)))") }
         return parts.joined(separator: " · ")
@@ -148,6 +150,20 @@ struct UpscaleSheet: View {
                     Text(fidelityBlurb).font(.caption).foregroundStyle(Theme.dim)
                     SliderRow(label: "Detail", value: choice.$detail)
                     if choice.model == "fast" { SliderRow(label: "Denoise", value: choice.$denoise) }
+                }
+                if choice.model == "photo" {
+                    Card(title: "Texture") {
+                        Toggle(isOn: choice.$adaptive) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Adaptive").font(.subheadline.weight(.medium))
+                                Text("Rebuilds texture only where your photo has it — skin, sky and walls stay clean. About 2× the work.")
+                                    .font(.caption).foregroundStyle(Theme.dim)
+                            }
+                        }
+                        SliderRow(label: "Realism", value: choice.$realism)
+                        Text(choice.adaptive ? "How far textured areas go towards the full AI texture." : "Blends the Photo network towards Clean: lower is calmer, colours stay locked to the original.")
+                            .font(.caption).foregroundStyle(Theme.dim)
+                    }
                 }
     }
 
@@ -207,7 +223,8 @@ struct UpscaleSheet: View {
         guard let i = app.info else { return nil }
         let p = Core.engine.plan(width: i.width, height: i.height, model: model, scale: Float(choice.scale), tile: 128)
         let twoPass = choice.scale > 6 ? 17.0 : 1.0
-        return p.gflop * Double(max(choice.quality, 1)) * twoPass
+        let fused = model == "photo" && choice.adaptive ? 2.0 : 1.0
+        return p.gflop * Double(max(choice.quality, 1)) * twoPass * fused
     }
 
     private var deviceEstimate: Double? {
@@ -215,7 +232,7 @@ struct UpscaleSheet: View {
         if choice.smart, let a = analysis, let i = app.info {
             let s = a.settings
             let p = Core.engine.plan(width: i.width, height: i.height, model: s.model, scale: s.scale, tile: 128)
-            return p.gflop * Double(max(s.ensemble, 1)) * (s.scale > 6 ? 17 : 1) / max(choice.gflops, 1)
+            return p.gflop * Double(max(s.ensemble, 1)) * (s.scale > 6 ? 17 : 1) * (s.adaptive ? 2 : 1) / max(choice.gflops, 1)
         }
         return gflop(effectiveModel).map { $0 / max(choice.gflops, 1) }
     }
@@ -225,7 +242,7 @@ struct UpscaleSheet: View {
         if choice.smart, let a = analysis, let i = app.info {
             let s = a.settings
             let p = Core.engine.plan(width: i.width, height: i.height, model: s.model, scale: s.scale, tile: 128)
-            return p.gflop * Double(max(s.ensemble, 1)) * (s.scale > 6 ? 17 : 1) / 150 + 8
+            return p.gflop * Double(max(s.ensemble, 1)) * (s.scale > 6 ? 17 : 1) * (s.adaptive ? 2 : 1) / 150 + 8
         }
         let m = choice.model == "auto" ? (effectiveModel == "anime" || effectiveModel == "lineart" ? "anime" : "photo") : choice.model
         return gflop(m).map { $0 / 150 + 8 }

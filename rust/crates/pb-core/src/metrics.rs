@@ -125,3 +125,42 @@ pub fn edge_similarity(a: &Image, b: &Image) -> f64 {
         .sum();
     s / ((w - 2) * (h - 2)) as f64
 }
+
+/// Texture match (0..1): per 8x8 patch, the fine-detail level of `b`
+/// (std of luma minus its 3x3 mean) against `a`'s, scored
+/// `exp(-|ln(b/a)|)` and averaged. Unlike PSNR/SSIM it punishes both
+/// blur (too little texture) and invented grain on flat areas (too much),
+/// which is the trade-off GAN upscalers make.
+pub fn texture_match(a: &Image, b: &Image) -> f64 {
+    assert_eq!((a.w, a.h), (b.w, b.h));
+    let hp = |img: &Image| -> Vec<f32> {
+        let l = luma_plane(img);
+        let m = crate::filters::box_blur_plane(&l, img.w, img.h, 1);
+        l.iter().zip(&m).map(|(x, y)| x - y).collect()
+    };
+    let (ha, hb) = (hp(a), hp(b));
+    let (w, h) = (a.w, a.h);
+    let eps = 0.75 / 255.0;
+    let mut acc = 0.0f64;
+    let mut n = 0usize;
+    for py in (2..h.saturating_sub(10)).step_by(8) {
+        for px in (2..w.saturating_sub(10)).step_by(8) {
+            let std = |p: &[f32]| {
+                let (mut s, mut s2) = (0.0f64, 0.0f64);
+                for y in py..py + 8 {
+                    for x in px..px + 8 {
+                        let v = p[y * w + x] as f64;
+                        s += v;
+                        s2 += v * v;
+                    }
+                }
+                let m = s / 64.0;
+                (s2 / 64.0 - m * m).max(0.0).sqrt()
+            };
+            let (sa, sb) = (std(&ha) + eps, std(&hb) + eps);
+            acc += (-(sb / sa).ln().abs()).exp();
+            n += 1;
+        }
+    }
+    acc / n.max(1) as f64
+}

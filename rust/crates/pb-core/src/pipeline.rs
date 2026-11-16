@@ -23,6 +23,18 @@ pub struct Settings {
     /// copies. Cleaner, steadier detail at a proportional time cost.
     #[serde(default = "one")]
     pub ensemble: usize,
+    /// Photo model texture strength (1 = full GAN, 0 = the faithful
+    /// network); interpolates the two networks' weights, so it is free.
+    #[serde(default = "full")]
+    pub realism: f32,
+    /// Run the faithful network too and mix per pixel by source texture
+    /// (`fusion`). About twice the compute.
+    #[serde(default)]
+    pub adaptive: bool,
+}
+
+fn full() -> f32 {
+    1.0
 }
 
 fn one() -> usize {
@@ -31,7 +43,7 @@ fn one() -> usize {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { scale: 4.0, fidelity: Fidelity::Natural, detail: 0.35, tile: 128, pad: 16, ensemble: 1 }
+        Settings { scale: 4.0, fidelity: Fidelity::Natural, detail: 0.35, tile: 128, pad: 16, ensemble: 1, realism: 1.0, adaptive: false }
     }
 }
 

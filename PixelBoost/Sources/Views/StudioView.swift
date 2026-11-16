@@ -209,7 +209,8 @@ struct StudioView: View {
             resultPreview = job.canvas
             let plan = Core.engine.plan(width: info.width, height: info.height, model: o.model, scale: Float(scale), tile: 128)
             if o.seconds > 2 {
-                choice.gflops = 0.7 * choice.gflops + 0.3 * (plan.gflop * Double(o.passes) * Double(max(quality, 1)) / o.seconds)
+                let fused = o.adaptive ? 2.0 : 1.0
+                choice.gflops = 0.7 * choice.gflops + 0.3 * (plan.gflop * Double(o.passes) * Double(max(quality, 1)) * fused / o.seconds)
             }
             let entry = HistoryEntry(id: "", createdAt: 0, model: o.model, scale: Float(scale), inWidth: info.width, inHeight: info.height,
                                      outWidth: o.width, outHeight: o.height, seconds: o.seconds, fidelityDb: o.fidelityDb, resultPath: "", thumbPath: "")

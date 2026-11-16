@@ -10,6 +10,7 @@ pub mod engine;
 pub mod enhance;
 pub mod fidelity;
 pub mod filters;
+pub mod fusion;
 pub mod fx;
 pub mod image;
 pub mod mask;
@@ -24,7 +25,7 @@ pub mod shape;
 pub mod stream;
 pub mod text;
 
-pub use engine::{Engine, TileEvent, TileOptions};
+pub use engine::{backend, gpu_name, gpu_speed, set_backend, set_gpu_tune_cache, Backend, Engine, TileEvent, TileOptions, Tuning};
 pub use image::Image;
 
 /// Which SIMD convolution kernel is active.

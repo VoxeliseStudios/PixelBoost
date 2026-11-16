@@ -16,6 +16,10 @@ pub trait SrNetwork: Send + Sync {
     fn forward(&self, x: &Fmap) -> Fmap;
     /// Multiply-accumulates per *input* pixel.
     fn macs_per_px(&self) -> f64;
+    /// Where the network runs ("cpu: avx2-fma 6x16", "gpu: ...").
+    fn backend(&self) -> String {
+        format!("cpu: {}", crate::conv::kernel_name())
+    }
 }
 
 pub(crate) fn conv(w: &Weights, name: &str) -> Result<Conv3x3, String> {

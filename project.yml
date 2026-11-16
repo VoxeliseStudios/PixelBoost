@@ -38,6 +38,11 @@ targets:
       # into RustCore/ before XcodeGen runs. Static library: not embedded.
       - framework: RustCore/PixelBoostCore.xcframework
         embed: false
+      # The engine's GPU backend (pb-gpu, wgpu on Metal) links these.
+      - sdk: Metal.framework
+      - sdk: QuartzCore.framework
+      - sdk: CoreGraphics.framework
+      - sdk: MetalPerformanceShaders.framework
     sources:
       - path: PixelBoost/Sources
       - path: RustCore/PixelBoostCore.swift

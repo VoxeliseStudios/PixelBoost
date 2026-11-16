@@ -17,6 +17,86 @@ pub struct Engine {
     pub info: ModelInfo,
 }
 
+/// Weight-space adjustments applied when a model loads.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Tuning {
+    /// `fast` only: blend in the denoising twin (0..1).
+    pub denoise: Option<f32>,
+    /// `photo` only: GAN texture strength (1 = Real-ESRGAN, 0 = RealESRNet).
+    pub realism: Option<f32>,
+}
+
+impl Tuning {
+    /// Cache key part ("d0.40 r1.00").
+    pub fn key(&self) -> String {
+        format!("d{:.2} r{:.2}", self.denoise.unwrap_or(0.0), self.realism.unwrap_or(1.0))
+    }
+}
+
+/// Where networks run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Backend {
+    /// The GPU when there is one, else the CPU.
+    Auto,
+    Cpu,
+    Gpu,
+}
+
+static BACKEND: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Choose the backend for engines loaded from now on (the app's setting;
+/// `PB_BACKEND=cpu|gpu` overrides it for the CLI and servers).
+pub fn set_backend(b: Backend) {
+    BACKEND.store(b as u8, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn backend() -> Backend {
+    match std::env::var("PB_BACKEND").as_deref() {
+        Ok("cpu") => return Backend::Cpu,
+        Ok("gpu") => return Backend::Gpu,
+        _ => {}
+    }
+    match BACKEND.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => Backend::Cpu,
+        2 => Backend::Gpu,
+        _ => Backend::Auto,
+    }
+}
+
+/// Where the GPU tuning result is cached (first GPU use tunes the kernels
+/// for this device, ~1-2 s, then reuses the file).
+pub fn set_gpu_tune_cache(path: &Path) {
+    #[cfg(feature = "gpu")]
+    pb_gpu::tune::set_cache_path(path);
+    #[cfg(not(feature = "gpu"))]
+    let _ = path;
+}
+
+/// Measured GPU and CPU speed (GFLOP/s) after tuning, when there is a GPU.
+pub fn gpu_speed() -> Option<(f64, f64)> {
+    #[cfg(feature = "gpu")]
+    {
+        let g = pb_gpu::Gpu::get()?;
+        pb_gpu::tune::ensure(&g).map(|r| (r.gpu_gflops, r.cpu_gflops))
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        None
+    }
+}
+
+/// The GPU's name when GPU inference is available ("AMD Radeon 610M (Vulkan)").
+pub fn gpu_name() -> Option<String> {
+    #[cfg(feature = "gpu")]
+    {
+        pb_gpu::Gpu::get().map(|g| g.describe())
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        None
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct TileOptions {
     /// Inner tile size in source pixels.
@@ -51,20 +131,68 @@ impl Engine {
     /// Load a bundled model by id. `denoise` (0..1) only applies to `fast`:
     /// it blends in the denoising twin weights.
     pub fn load(dir: &Path, id: &str, denoise: Option<f32>) -> Result<Engine, String> {
-        let info = *models::find(id).ok_or_else(|| format!("unknown model {id}"))?;
+        Self::load_on(dir, id, Tuning { denoise, realism: None }, backend())
+    }
+
+    /// Load with weight-space tuning (denoise for `fast`, realism for `photo`).
+    pub fn load_tuned(dir: &Path, id: &str, t: Tuning) -> Result<Engine, String> {
+        Self::load_on(dir, id, t, backend())
+    }
+
+    fn weights(dir: &Path, id: &str, t: Tuning) -> Result<Weights, String> {
+        let info = models::find(id).ok_or_else(|| format!("unknown model {id}"))?;
         let mut w = read(dir, info.file)?;
-        if let (Some(d), "fast") = (denoise, id) {
+        if let (Some(d), "fast") = (t.denoise, id) {
             if d > 0.0 {
                 let wdn = read(dir, models::find("fast-denoise").unwrap().file)?;
                 w = pbm::blend(&wdn, &w, d.clamp(0.0, 1.0))?;
             }
         }
+        if let (Some(r), "photo") = (t.realism, id) {
+            // Real-ESRGAN x4plus was fine-tuned from RealESRNet x4plus, so
+            // interpolating their weights walks the perception-distortion
+            // curve: 1 = full GAN texture, 0 = the faithful network.
+            if r < 0.999 {
+                let clean = read(dir, models::find("clean").unwrap().file)?;
+                w = pbm::blend(&w, &clean, r.clamp(0.0, 1.0))?;
+            }
+        }
+        Ok(w)
+    }
+
+    /// Load on a specific backend (`Gpu` falls back to the CPU when there
+    /// is no usable GPU).
+    pub fn load_on(dir: &Path, id: &str, tune: Tuning, be: Backend) -> Result<Engine, String> {
+        let info = *models::find(id).ok_or_else(|| format!("unknown model {id}"))?;
+        let w = Self::weights(dir, id, tune)?;
+        #[cfg(feature = "gpu")]
+        if be != Backend::Cpu {
+            if let Some(gpu) = pb_gpu::Gpu::get().filter(|g| be == Backend::Gpu || pb_gpu::tune::ensure(g).map_or(true, |r| r.gpu_wins())) {
+                let (d, i) = (dir.to_path_buf(), id.to_string());
+                let fallback: pb_gpu::net_fallback::CpuFallback = Box::new(move || pb_nn::build(&Engine::weights(&d, &i, tune)?));
+                match pb_gpu::GpuNet::new(gpu, &w, fallback) {
+                    Ok(net) => return Ok(Engine { net: Box::new(net), info }),
+                    Err(e) => eprintln!("pb-core: {id} on the GPU failed ({e}); using the CPU"),
+                }
+            }
+        }
+        let _ = be;
         let net = pb_nn::build(&w)?;
         Ok(Engine { net, info })
     }
 
     pub fn from_weights(w: &Weights, info: ModelInfo) -> Result<Engine, String> {
         Ok(Engine { net: pb_nn::build(w)?, info })
+    }
+
+    /// "cpu: avx2-fma 6x16" or "gpu: Apple A17 Pro GPU (Metal)".
+    pub fn backend(&self) -> String {
+        self.net.backend()
+    }
+
+    /// Whether this engine's network runs on the GPU.
+    pub fn on_gpu(&self) -> bool {
+        self.net.backend().starts_with("gpu")
     }
 
     pub fn scale(&self) -> usize {

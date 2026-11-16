@@ -72,6 +72,8 @@ impl PixelBoostCore {
                 ensemble: r.ensemble as u32,
                 tile: 128,
                 max_output_mp,
+                realism: r.realism,
+                adaptive: r.adaptive,
             },
             est_seconds: r.est_seconds,
             summary: r.summary,

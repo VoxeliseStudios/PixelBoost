@@ -18,6 +18,9 @@ struct PixelBoostApp: App {
                 .onOpenURL { url in app.importFile(url) }
         }
         .onChange(of: scenePhase) { _, phase in
+            // iOS forbids GPU work in the background: running upscales
+            // carry on on the CPU until the app is back.
+            Core.engine.setGpuPaused(paused: phase != .active)
             if phase == .active { app.pickUpSharedPhoto() }
             if phase == .background, CloudStore.shared.activeCount > 0 { CloudStore.scheduleRefresh() }
         }

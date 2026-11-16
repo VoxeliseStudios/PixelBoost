@@ -6,7 +6,8 @@ use crate::{flag, models_dir};
 use pb_core::enhance::sharpen_detail;
 use pb_core::fidelity::{refine, Fidelity};
 use pb_core::image::Format;
-use pb_core::metrics::{edge_similarity, gradient_energy, psnr, ssim};
+use pb_core::metrics::{edge_similarity, gradient_energy, psnr, ssim, texture_match};
+use pb_core::fusion::{Stack, Upscaler};
 use pb_core::pipeline::{upscale, Settings};
 use pb_core::resample::{resize, shrink_box, Filter};
 use pb_core::{models, Engine, Image, TileOptions};
@@ -18,8 +19,14 @@ pub fn upscale_cmd(args: &[String]) -> Result<(), String> {
     let model = flag(args, "--model").unwrap_or("auto");
     let img = Image::open(&args[1])?;
     let model = if model == "auto" { pb_core::classify::pick_model(&img).to_string() } else { model.to_string() };
-    let eng = Engine::load(&dir, &model, flag(args, "--denoise").and_then(|v| v.parse().ok()))?;
     let mut st = Settings::default();
+    if let Some(r) = flag(args, "--realism").and_then(|v| v.parse().ok()) {
+        st.realism = r;
+    }
+    st.adaptive = args.iter().any(|a| a == "--adaptive");
+    let denoise = flag(args, "--denoise").and_then(|v| v.parse().ok());
+    let stack = pb_core::fusion::Stack::load(&dir, &model, denoise, st.realism, st.adaptive)?;
+    eprintln!("backend: {}", stack.backend());
     if let Some(s) = flag(args, "--scale").and_then(|v| v.parse().ok()) {
         st.scale = s;
     }
@@ -36,6 +43,7 @@ pub fn upscale_cmd(args: &[String]) -> Result<(), String> {
         st.ensemble = e;
     }
     if args.iter().any(|a| a == "--legacy") {
+        let eng = Engine::load(&dir, &model, denoise)?;
         let (out, rep) = upscale(&eng, &img, &st, &mut |e| {
             eprint!("\r  {} tile {}/{}   ", model, e.done, e.total);
             true
@@ -47,7 +55,7 @@ pub fn upscale_cmd(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
     let lim = pb_core::stream::Limits { max_output_px: flag(args, "--max-mp").and_then(|v| v.parse::<f64>().ok()).map(|m| (m * 1e6) as usize).unwrap_or(400_000_000) };
-    let (out, rep, capped) = pb_core::stream::upscale(&eng, &img, &st, lim, &mut |e| {
+    let (out, rep, capped) = pb_core::stream::upscale(&stack, &img, &st, lim, &mut |e| {
         eprint!("\r  {} tile {}/{}   ", model, e.done, e.total);
         true
     })
@@ -97,6 +105,7 @@ struct Score {
     ssim: f64,
     edge: f64,
     grad: f64,
+    tex: f64,
     secs: f64,
     n: usize,
 }
@@ -113,6 +122,19 @@ pub fn eval_cmd(args: &[String]) -> Result<(), String> {
     let list: Option<Vec<String>> = flag(args, "--list").map(|s| s.split(',').map(String::from).collect());
     let ids: Vec<&str> = models::MODELS.iter().map(|m| m.id).filter(|id| *id != "fast-denoise" && only.as_ref().map_or(true, |o| o.iter().any(|x| x == id))).collect();
     let engines: Vec<Engine> = ids.iter().map(|id| Engine::load(&dir, id, None)).collect::<Result<_, _>>()?;
+    // `--variants r0.5,r0.75,fusion,fusion0.7`: photo realism (weight
+    // interpolation with clean) and adaptive fusion.
+    let mut variants: Vec<(String, Stack)> = Vec::new();
+    for v in flag(args, "--variants").map(|s| s.split(',').map(String::from).collect::<Vec<_>>()).unwrap_or_default() {
+        let st = if let Some(r) = v.strip_prefix("fusion") {
+            Stack::load(&dir, "photo", None, r.parse().unwrap_or(1.0), true)?
+        } else if let Some(r) = v.strip_prefix('r') {
+            Stack::load(&dir, "photo", None, r.parse().map_err(|_| format!("bad variant {v}"))?, false)?
+        } else {
+            return Err(format!("unknown variant {v}"));
+        };
+        variants.push((v, st));
+    }
 
     let mut files: Vec<_> = std::fs::read_dir(src_dir).map_err(|e| e.to_string())?.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.is_file()).collect();
     files.sort();
@@ -138,13 +160,14 @@ pub fn eval_cmd(args: &[String]) -> Result<(), String> {
         let ggt = gradient_energy(&gt);
         let mut sheet: Vec<(String, Image)> = vec![("gt".into(), gt.clone())];
         let mut record = |label: String, img: &Image, secs: f64, totals: &mut BTreeMap<String, Score>, sheet: &mut Vec<(String, Image)>| {
-            let s = Score { psnr: psnr(&gt, img, 4), ssim: ssim(&gt, img), edge: edge_similarity(&gt, img), grad: gradient_energy(img) / ggt, secs, n: 1 };
-            per_image.push_str(&format!("{name:<8} {label:<18} psnr {:6.2}  ssim {:.4}  edge {:.4}  grad {:.2}  {:.2}s\n", s.psnr, s.ssim, s.edge, s.grad, s.secs));
+            let s = Score { psnr: psnr(&gt, img, 4), ssim: ssim(&gt, img), edge: edge_similarity(&gt, img), grad: gradient_energy(img) / ggt, tex: texture_match(&gt, img), secs, n: 1 };
+            per_image.push_str(&format!("{name:<8} {label:<18} psnr {:6.2}  ssim {:.4}  edge {:.4}  grad {:.2}  tex {:.4}  {:.2}s\n", s.psnr, s.ssim, s.edge, s.grad, s.tex, s.secs));
             let t = totals.entry(label.clone()).or_default();
             t.psnr += s.psnr;
             t.ssim += s.ssim;
             t.edge += s.edge;
             t.grad += s.grad;
+            t.tex += s.tex;
             t.secs += s.secs;
             t.n += 1;
             sheet.push((label, img.clone()));
@@ -171,6 +194,19 @@ pub fn eval_cmd(args: &[String]) -> Result<(), String> {
                 record(format!("{}:{}", eng.info.id, p.name), &img, secs, &mut totals, &mut sheet);
             }
         }
+        for (vname, st) in &variants {
+            let t = Instant::now();
+            let raw = st.forward(&lr);
+            let secs = t.elapsed().as_secs_f64();
+            for p in POSTS.iter().filter(|p| p.name == "raw" || p.name == "nat+d") {
+                let mut img = raw.clone();
+                if let Some(fp) = p.fidelity.params() {
+                    refine(&lr, &mut img, 4, fp);
+                }
+                sharpen_detail(&mut img, p.detail, 1.0);
+                record(format!("{vname}:{}", p.name), &img, secs, &mut totals, &mut sheet);
+            }
+        }
         // Contact sheet: one row per image, columns in `sheet` order.
         let cols = sheet.len();
         let mut big = Image::new(cols * (n + 4), n);
@@ -184,10 +220,10 @@ pub fn eval_cmd(args: &[String]) -> Result<(), String> {
         std::fs::write(format!("{out_dir}/sheet_columns.txt"), labels.join("\n")).ok();
         eprintln!("{name} done");
     }
-    let mut table = String::from("variant              psnr    ssim    edge    grad   secs\n");
+    let mut table = String::from("variant                psnr    ssim    edge    grad    tex    secs\n");
     for (k, s) in &totals {
         let n = s.n as f64;
-        table.push_str(&format!("{k:<18} {:6.2}  {:.4}  {:.4}  {:.2}  {:.2}\n", s.psnr / n, s.ssim / n, s.edge / n, s.grad / n, s.secs / n));
+        table.push_str(&format!("{k:<20} {:6.2}  {:.4}  {:.4}  {:.2}  {:.4}  {:.2}\n", s.psnr / n, s.ssim / n, s.edge / n, s.grad / n, s.tex / n, s.secs / n));
     }
     std::fs::write(format!("{out_dir}/per_image.txt"), &per_image).ok();
     std::fs::write(format!("{out_dir}/summary.txt"), &table).ok();

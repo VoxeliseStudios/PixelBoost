@@ -16,7 +16,8 @@ rustup target add aarch64-apple-ios aarch64-apple-ios-sim
 
 if [ "${SKIP_TESTS:-0}" != "1" ]; then
   echo "==> tests (host: $(uname -m))"
-  cargo test --release -p pb-nn -p pb-core
+  # pb-gpu: GPU vs CPU on Metal when the runner exposes a GPU (skips otherwise).
+  cargo test --release --no-fail-fast -p pb-nn -p pb-gpu -p pb-core
 fi
 
 for t in aarch64-apple-ios aarch64-apple-ios-sim; do

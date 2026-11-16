@@ -8,6 +8,10 @@ struct UpscaleChoice: DynamicProperty {
     @AppStorage("up.detail") var detail = 0.35
     @AppStorage("up.quality") var quality = 1
     @AppStorage("up.denoise") var denoise = 0.0
+    /// Photo model texture strength (1 = full GAN texture).
+    @AppStorage("up.realism") var realism = 1.0
+    /// Photo model: also run Clean and mix per pixel by the photo's texture.
+    @AppStorage("up.adaptive") var adaptive = false
     @AppStorage("up.where") var whereTo = "device"
     /// Learned speed of this phone (GFLOP/s).
     @AppStorage("up.gflops") var gflops = 40.0
@@ -18,7 +22,8 @@ struct UpscaleChoice: DynamicProperty {
 
     var settings: UpscaleSettings {
         UpscaleSettings(model: model, scale: Float(scale), fidelity: fidelity, detail: Float(detail),
-                        denoise: Float(denoise), ensemble: UInt32(quality), tile: 128, maxOutputMp: 120)
+                        denoise: Float(denoise), ensemble: UInt32(quality), tile: 128, maxOutputMp: 120,
+                        realism: Float(realism), adaptive: adaptive)
     }
 
     /// Settings for the server worker.
@@ -26,7 +31,7 @@ struct UpscaleChoice: DynamicProperty {
 
     static func cloudSettings(_ s: UpscaleSettings) -> [String: Any] {
         ["model": s.model, "scale": Double(s.scale), "fidelity": s.fidelity, "detail": Double(s.detail), "denoise": Double(s.denoise),
-         "ensemble": Int(s.ensemble), "format": "png"]
+         "ensemble": Int(s.ensemble), "format": "png", "realism": Double(s.realism), "adaptive": s.adaptive]
     }
 
     /// Smart analysis of a photo for where it will run (cached per photo).
@@ -49,6 +54,8 @@ struct UpscaleChoice: DynamicProperty {
         detail = Double(s.detail)
         denoise = Double(s.denoise)
         quality = Int(s.ensemble)
+        realism = Double(s.realism)
+        adaptive = s.adaptive
         smart = false
     }
 

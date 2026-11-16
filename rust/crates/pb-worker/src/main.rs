@@ -18,7 +18,8 @@ use pb_core::image::Format;
 use pb_core::pipeline::Settings;
 use pb_core::resample::{resize, Filter};
 use pb_core::stream::{self, Limits};
-use pb_core::{classify, Engine, Image};
+use pb_core::fusion::{Stack, Upscaler};
+use pb_core::{classify, Image};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -47,6 +48,16 @@ struct JobSettings {
     /// "png" or "jpg".
     #[serde(default = "png")]
     format: String,
+    /// Photo model texture strength (1 = full GAN).
+    #[serde(default = "full")]
+    realism: f32,
+    /// Photo + Clean fused per pixel by source texture.
+    #[serde(default)]
+    adaptive: bool,
+}
+
+fn full() -> f32 {
+    1.0
 }
 
 fn auto() -> String {
@@ -401,39 +412,46 @@ fn make_thumb(img: &Image, path: &std::path::Path) {
     }
 }
 
-fn run_job(app: &App, id: &str, cancel: Arc<AtomicBool>, engines: &mut Option<(String, Engine)>) -> Result<(), String> {
+fn run_job(app: &App, id: &str, cancel: Arc<AtomicBool>, engines: &mut Option<(String, Stack)>) -> Result<(), String> {
     let job = find(app, id).ok_or("job vanished")?;
     let dir = app.job_dir(id);
     let img = Image::open(&dir.join("input").to_string_lossy())?;
     make_thumb(&img, &dir.join("input_thumb.jpg"));
     let s = &job.settings;
-    let model = if s.model == "auto" {
-        // The server has compute to spare: best model for the content, no
-        // size budget.
+    // The server has compute to spare: on Auto, the best model for the
+    // content with no size budget, and adaptive fusion for photos.
+    let (model, adaptive) = if s.model == "auto" {
         match classify::content_kind(&img) {
-            "anime" => "anime",
-            _ => "photo",
+            "anime" => ("anime".to_string(), false),
+            _ => ("photo".to_string(), true),
         }
-        .to_string()
     } else {
-        s.model.clone()
+        (s.model.clone(), s.adaptive)
     };
-    let key = format!("{model}:{:.2}", s.denoise);
+    let realism = s.realism.clamp(0.0, 1.0);
+    let key = format!("{model}:{:.2}:{realism:.2}:{adaptive}", s.denoise);
     if engines.as_ref().map(|(k, _)| k != &key).unwrap_or(true) {
         *engines = None; // free the previous network first
         let denoise = (model == "fast" && s.denoise > 0.0).then_some(s.denoise);
-        *engines = Some((key, Engine::load(&app.models, &model, denoise)?));
+        *engines = Some((key, Stack::load(&app.models, &model, denoise, realism, adaptive)?));
     }
     let engine = &engines.as_ref().unwrap().1;
+    let mut fidelity = Fidelity::parse(&s.fidelity).unwrap_or(Fidelity::Natural);
+    if model == "photo" && realism < 0.999 && !adaptive && fidelity == Fidelity::Off {
+        fidelity = Fidelity::Natural;
+    }
     let st = Settings {
         scale: s.scale,
-        fidelity: Fidelity::parse(&s.fidelity).unwrap_or(Fidelity::Natural),
+        fidelity,
+        realism,
+        adaptive,
         detail: s.detail.clamp(0.0, 1.0),
         tile: 192,
         pad: 16,
         ensemble: s.ensemble.max(1) as usize,
     };
-    app.update(id, |j| j.model_used = model.clone(), false);
+    let used = Upscaler::label(engine);
+    app.update(id, |j| j.model_used = used.clone(), false);
     let mut last_save = std::time::Instant::now();
     let res = stream::upscale(engine, &img, &st, Limits { max_output_px: app.max_px }, &mut |e| {
         let save = last_save.elapsed() > Duration::from_secs(10);
@@ -490,7 +508,7 @@ fn run_job(app: &App, id: &str, cancel: Arc<AtomicBool>, engines: &mut Option<(S
 }
 
 fn worker_loop(app: App, rt: tokio::runtime::Handle) {
-    let mut engines: Option<(String, Engine)> = None;
+    let mut engines: Option<(String, Stack)> = None;
     loop {
         let next = {
             let jobs = app.jobs.lock().unwrap();

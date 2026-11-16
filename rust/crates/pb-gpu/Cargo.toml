@@ -1,0 +1,13 @@
+[package]
+name = "pb-gpu"
+description = "PixelBoost's own GPU inference backend: hand-written WGSL implicit-GEMM 3x3 convolutions on wgpu (Metal on iPhone, Vulkan on Linux)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+pb-nn = { path = "../pb-nn" }
+wgpu = { version = "28", default-features = false, features = ["std", "parking_lot", "metal", "vulkan", "wgsl"] }
+pollster = "0.4"
+serde.workspace = true
+serde_json.workspace = true

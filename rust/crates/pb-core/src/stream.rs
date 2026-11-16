@@ -7,7 +7,7 @@
 //! plus one tile's working set, so a 5 MP photo going to 86 MP needs ~0.4 GB
 //! instead of several GB of float buffers.
 
-use crate::engine::Engine;
+use crate::fusion::Upscaler;
 use crate::enhance::sharpen_detail;
 use crate::fidelity::refine;
 use crate::image::{Format, Image};
@@ -171,7 +171,7 @@ struct PassOut<'a> {
 
 #[allow(clippy::too_many_arguments)]
 fn run_pass(
-    engine: &Engine,
+    engine: &dyn Upscaler,
     src: &dyn Source,
     st: &Settings,
     dst: PassOut<'_>,
@@ -372,7 +372,7 @@ fn axis_taps(o0: usize, o1: usize, m: usize, o: usize, origin: isize, len: usize
 }
 
 /// Upscale `img` per `st`, bounded by `lim`. Returns the 8-bit result.
-pub fn upscale(engine: &Engine, img: &Image, st: &Settings, lim: Limits, progress: &mut dyn FnMut(StreamEvent<'_>) -> bool) -> Option<(Rgba8, Report, bool)> {
+pub fn upscale(engine: &dyn Upscaler, img: &Image, st: &Settings, lim: Limits, progress: &mut dyn FnMut(StreamEvent<'_>) -> bool) -> Option<(Rgba8, Report, bool)> {
     let t0 = Instant::now();
     let had_alpha = img.has_alpha();
     let px = (img.w * img.h) as f64;
@@ -418,7 +418,7 @@ pub fn upscale(engine: &Engine, img: &Image, st: &Settings, lim: Limits, progres
     }
     let fidelity_db = se.map(|(acc, n)| if n == 0 || acc <= 1e-12 { 99.0 } else { 10.0 * ((n as f64) / acc).log10() }).unwrap_or(0.0);
     let report = Report {
-        model: engine.info.id.to_string(),
+        model: engine.label(),
         in_w: img.w,
         in_h: img.h,
         out_w: tw,
