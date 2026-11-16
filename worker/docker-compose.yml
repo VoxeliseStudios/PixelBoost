@@ -9,10 +9,11 @@ services:
     container_name: pixelboost_worker
     restart: unless-stopped
     user: "1000:1000"
-    # Published (not host network) so Mel can reach it; requests without the
-    # worker key are refused.
-    ports:
-      - "8095:8095"
+    # Host network so ufw applies: only Mel (upscaler-bridge) may reach :8095
+    # (`ufw allow from 192.168.1.87 to any port 8095`). A Docker `ports:`
+    # publish bypasses ufw and exposed it to the whole LAN. Requests without
+    # the worker key are refused either way.
+    network_mode: host
     environment:
       - WORKER_KEY=${WORKER_KEY}
       - RAYON_NUM_THREADS=6

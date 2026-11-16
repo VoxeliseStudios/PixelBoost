@@ -155,12 +155,17 @@ impl Shared {
 
 // ---------------------------------------------------------------- HTTP
 
+/// Constant-time comparison (only the length can leak).
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
 async fn auth(State(app): State<App>, headers: HeaderMap, req: Request, next: axum::middleware::Next) -> Response {
     if req.uri().path() == "/health" || app.key.is_empty() {
         return next.run(req).await;
     }
     match headers.get("x-worker-key").and_then(|v| v.to_str().ok()) {
-        Some(k) if k == app.key => next.run(req).await,
+        Some(k) if ct_eq(k.as_bytes(), app.key.as_bytes()) => next.run(req).await,
         _ => err(StatusCode::FORBIDDEN, "bad worker key"),
     }
 }
