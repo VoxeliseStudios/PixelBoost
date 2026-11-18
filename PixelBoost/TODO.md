@@ -77,3 +77,14 @@ operation is a call into PixelBoostCore (Rust).
       picked, the content kind and the real resolution; runs and cloud jobs
       use the resolved settings (incl. prescale).
 - [ ] On device: check the Auto notes update when switching photo / where.
+
+## 5.6 Pixel Art (2026-11-17)
+
+- [x] `Views/Editor/PixelArtPanel.swift`: style chips, pixels-across, palette
+      swatches, colours, dither / outline modes, line detail, rim light +
+      light angle, hue shift, punch, simplify, sparkles, cleanup, native
+      size. All data and the op come from Rust (`pixelStyles`,
+      `pixelPalettes`, `pixelArtOp`).
+- [ ] On device: check preview speed while dragging sliders (Rust renders a
+      1.5 MP preview in ~90 ms on desktop).
+- [ ] Custom palette editor (the op already takes `custom` colours).

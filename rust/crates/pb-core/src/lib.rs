@@ -19,6 +19,7 @@ pub mod metrics;
 pub mod models;
 pub mod ops;
 pub mod pipeline;
+pub mod pixelart;
 pub mod presets;
 pub mod resample;
 pub mod shape;

@@ -27,7 +27,8 @@ pub enum Op {
     Lut { path: String, #[serde(default = "full")] amount: f32 },
     Denoise { amount: f32 },
     Sharpen { amount: f32, #[serde(default = "one")] radius: f32 },
-    PixelArt { cell: usize, colors: usize, #[serde(default)] dither: bool, #[serde(default)] outline: bool },
+    /// Pixel-art engine (see `pixelart`); old `{cell, colors, dither: bool, outline: bool}` recipes still parse.
+    PixelArt(crate::pixelart::PixelArt),
     NormalMap { #[serde(default = "two")] strength: f32 },
     Seamless { #[serde(default = "quarter")] blend: f32 },
     AoBlend { path: String, #[serde(default = "full")] amount: f32 },
@@ -226,6 +227,7 @@ impl Op {
     pub fn changes_geometry(&self) -> bool {
         match self {
             Op::Rotate { .. } | Op::Crop { .. } | Op::Straighten { .. } | Op::Resize { .. } | Op::Frame { .. } | Op::Perspective { .. } | Op::Flip { .. } | Op::ShapeCrop(_) => true,
+            Op::PixelArt(p) => p.native,
             Op::Chain { ops } => ops.iter().any(|o| o.changes_geometry()),
             _ => false,
         }
@@ -295,7 +297,7 @@ pub fn apply(img: &Image, op: &Op) -> Result<Image, String> {
         }
         Op::Denoise { amount } => out = edit::denoise(img, *amount),
         Op::Sharpen { amount, radius } => edit::sharpen(&mut out, *amount, *radius),
-        Op::PixelArt { cell, colors, dither, outline } => out = edit::pixel_art(img, *cell, *colors, *dither, *outline),
+        Op::PixelArt(p) => out = crate::pixelart::render(img, p)?,
         Op::NormalMap { strength } => out = edit::normal_map(img, *strength),
         Op::Seamless { blend } => out = edit::seamless(img, *blend),
         Op::AoBlend { path, amount } => edit::ao_blend(&mut out, &Image::open(path)?, *amount),
@@ -425,6 +427,7 @@ mod tests {
             r#"{"op":"crop","x":0.25,"y":0.25,"w":0.5,"h":0.5}"#,
             r#"{"op":"straighten","degrees":5}"#,
             r#"{"op":"pixel_art","cell":2,"colors":4,"dither":true,"outline":true}"#,
+            r#"{"op":"pixel_art","width":8,"palette":"ramps","colors":12,"dither":"pattern","outline":"selective","rim":0.5,"sparkle":0.5}"#,
             r#"{"op":"chain","ops":[{"op":"sharpen","amount":0.5},{"op":"denoise","amount":0.5},{"op":"seamless"},{"op":"normal_map"}]}"#,
             r#"{"op":"adjust","tint":0.3,"vibrance":0.5,"whites":0.2,"blacks":-0.2,"fade":0.3,"clarity":0.5,"texture":0.4,"dehaze":0.5,"grain":0.4}"#,
             r#"{"op":"adjust","exposure":0.5}"#,

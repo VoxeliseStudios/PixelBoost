@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 
 pub mod editor;
 pub mod history;
+pub mod pixel;
 pub mod server;
 pub mod smart;
 

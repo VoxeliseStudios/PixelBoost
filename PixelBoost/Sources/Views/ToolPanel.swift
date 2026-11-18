@@ -57,10 +57,8 @@ struct ToolPanel: View {
     @State private var smoothAmount = 0.5
     @State private var smoothRadius = 0.5
     // Pixel art
-    @State private var cell = 8.0
-    @State private var colors = 16.0
-    @State private var dither = false
-    @State private var outline = false
+    @State private var pixel: PixelArtSettings? = PixelArtControls.defaultStyle?.settings
+    @State private var pixelStyle = PixelArtControls.defaultStyle?.id ?? ""
     // LUT / maps
     @State private var lutURL: URL?
     @State private var mapURL: URL?
@@ -216,7 +214,7 @@ struct ToolPanel: View {
             }
             return opJSON("chain", ["ops": ops])
         case .pixelArt:
-            return opJSON("pixel_art", ["cell": Int(cell), "colors": Int(colors), "dither": dither, "outline": outline])
+            return pixel.map { Core.engine.pixelArtOp(settings: $0) }
         case .lut:
             guard let l = lutURL else { return nil }
             return opJSON("lut", ["path": l.path, "amount": amount])
@@ -368,11 +366,8 @@ struct ToolPanel: View {
                 }
             }
         case .pixelArt:
-            VStack(spacing: 10) {
-                SliderRow(label: "Pixel size", value: $cell, range: 2...32, format: { "\(Int($0))px" })
-                SliderRow(label: "Colours", value: $colors, range: 2...64, format: { "\(Int($0))" })
-                Toggle("Dither", isOn: $dither)
-                Toggle("Outline", isOn: $outline)
+            if let settings = Binding($pixel) {
+                PixelArtControls(settings: settings, style: $pixelStyle)
             }
         case .lut:
             VStack(spacing: 10) {

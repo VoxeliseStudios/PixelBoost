@@ -132,3 +132,23 @@ Overall tracker: ../RUST-REMAKE.md
       resolution test; detect ringing separately.
 - [ ] A learned content classifier (semantics) would catch soft cartoons.
 - [x] Released as v5.5.0 (2026-11-16): signed IPA verified from the release and the AltStore source (identical), repo back to private.
+
+## 5.6 — Pixel Art engine (2026-11-17)
+
+- [x] `pb-core/src/pixelart.rs` (see ../RUST-REMAKE.md 5.6), FFI
+      `pb-ffi/src/pixel.rs`, CLI `edit in out pixel:<style>[:json]`.
+- [ ] Faces: pale skin next to white areas can share one palette colour
+      at low widths (g4170 bench image). A face/skin-aware weight in the
+      palette k-means would keep a skin ramp.
+- [ ] Sparkles: specular highlights on dark glossy surfaces (leather) can
+      read as stars; a shape test on the source peak (round, tiny) would
+      separate them. Users can lower the Sparkles slider meanwhile.
+- [ ] Outlines from the edge map can follow fabric creases (bed sheet in
+      g4170); an orientation-consistent hysteresis would keep only object
+      contours.
+- [ ] Optional own segmentation (Cutout mask) as the "subject" for rim
+      light and outlines, instead of edge contrast alone.
+- [ ] Animated pixel art (GIF / video frames with a palette shared across
+      frames and temporal dither stability).
+- [ ] GPU path not needed (64 MP in ~1 s on CPU); revisit only if previews
+      feel slow on older iPhones.

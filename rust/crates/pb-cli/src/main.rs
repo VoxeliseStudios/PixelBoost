@@ -19,7 +19,7 @@ fn usage() -> ! {
   gpu-tune [cache.json]                tune the GPU kernels for this device
   eval <image dir> <out dir> [--models dir] [--crop n] [--list a,b] [--only ids]
                                        degrade -> upscale -> compare with original
-  edit <in> <out> <op json | @file.json | preset:id>   run an editing op (timed)
+  edit <in> <out> <op json | @file.json | preset:id | pixel:style[:json]>   run an editing op (timed)
   presets                              list built-in presets
   analyze <images...> [--gflops g] [--seconds s] [--cloud] [--degrade soft|noise|jpeg]
                                        measure photos, print the smart settings
@@ -134,6 +134,16 @@ fn main() {
             let spec = &args[3];
             let json = if let Some(id) = spec.strip_prefix("preset:") {
                 pb_core::presets::BUILTIN.iter().find(|b| b.id == id).map(|b| b.op.to_string()).ok_or(format!("no preset {id}"))?
+            } else if let Some(id) = spec.strip_prefix("pixel:") {
+                // pixel:<style>[:<json overrides>], e.g. pixel:starlight:{"width":128}
+                let (id, extra) = id.split_once(':').unwrap_or((id, "{}"));
+                let mut v = serde_json::to_value(pb_core::pixelart::style(id).ok_or(format!("no pixel style {id}"))?).unwrap();
+                let extra: serde_json::Value = serde_json::from_str(extra).map_err(|e| format!("overrides: {e}"))?;
+                for (k, x) in extra.as_object().into_iter().flatten() {
+                    v[k] = x.clone();
+                }
+                v["op"] = "pixel_art".into();
+                v.to_string()
             } else if let Some(f) = spec.strip_prefix('@') {
                 std::fs::read_to_string(f).map_err(|e| format!("{f}: {e}"))?
             } else {

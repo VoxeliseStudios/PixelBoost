@@ -95,7 +95,8 @@ preview matches the export.
   rotation, letter spacing), drawing (pen, marker, highlighter, neon,
   lines, arrows, boxes, ellipses), image layers / stickers / double
   exposure with 12 blend modes, frames (border, polaroid, film, card,
-  fit-to-ratio, rounded corners), cutout with backgrounds, pixel art,
+  fit-to-ratio, rounded corners), cutout with backgrounds, pixel art (own engine: 9 styles, hue-shifted
+  ramps, smart dither, shaded outlines, rim light, sparkles),
   seamless textures, normal maps, AO and depth fog.
 - **Workflow** — histogram with clipping warnings, press-and-hold
   before/after, pinch-zoom, full edit history (jump to any step), export to

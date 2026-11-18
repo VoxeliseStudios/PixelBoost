@@ -173,6 +173,28 @@ Models/pbnn/       converted models (fp16 .pbnn)
       photo in Rust (app, FFI fallback and cloud worker). Details and the
       12-meme test in rust/TODO.md.
 
+## 5.6 — Pixel Art engine (2026-11-17)
+
+- [x] `pb-core::pixelart` replaces the old box-shrink + k-means pixel art:
+      dominant-colour cell sampling (2-means per cell; thin dark lines and
+      each cell's brightest point survive), edge-preserving abstraction,
+      punch + hue shifting in OKLab, palettes (From photo, Ramps = k-means
+      nudged along hue-shifted ramps, 7 built-ins, custom), palette-aware
+      pattern dither only in smooth gradients (+ ordered, diffusion),
+      orphan / L-corner cleanup, continuous ink or shaded outlines
+      (hysteresis, no rings around specks, 1 px outside cutouts), rim light
+      on light-facing edges, 4-point sparkle stars on isolated bright
+      points, native-size output.
+- [x] Grid is "pixels across", so the live preview matches the full-size
+      result (the old pixel size in source px did not).
+- [x] 9 styles (Starlight, Classic, HD, Sprite, 8-bit, Nocturne, Handheld,
+      Sunset, Mono ink). Old `{cell, colors, dither: bool, outline: bool}`
+      recipes still parse.
+- [x] FFI `pixel.rs`: styles, palettes (swatches), options and the op JSON
+      built in Rust; Swift panel `Views/Editor/PixelArtPanel.swift` only
+      binds controls to `PixelArtSettings`.
+- Speed (this PC): 1.5 MP 90 ms, 36 MP 0.6 s, 64 MP 1.1 s.
+
 ## Bench numbers (26 gallery images, 256px GT crop -> 64px -> 4x)
 
 Final settings (`pixelboost eval testimages/src OUT --crop 256`):
@@ -210,4 +232,5 @@ cargo build --release
 ./target/release/pixelboost analyze testimages/src/* [-v] [--gflops 40] [--seconds 180] [--cloud]
 ./target/release/pixelboost shape in.jpg out.png heart '[{"style":"neon","width":0.03}]'
 ./target/release/pixelboost replace original.heic upscaled.png out   # -> out.jpg
+./target/release/pixelboost edit in.png out.png 'pixel:starlight:{"width":128,"sparkle":0}'   # pixel art style + overrides
 ```
