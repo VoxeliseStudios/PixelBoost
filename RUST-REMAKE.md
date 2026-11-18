@@ -194,6 +194,9 @@ Models/pbnn/       converted models (fp16 .pbnn)
       built in Rust; Swift panel `Views/Editor/PixelArtPanel.swift` only
       binds controls to `PixelArtSettings`.
 - Speed (this PC): 1.5 MP 90 ms, 36 MP 0.6 s, 64 MP 1.1 s.
+- [x] Released as v5.6.0 (2026-11-18): IPA signed (app + 2 extensions with
+      the App Group), AltStore source serves the identical file, repo back to
+      private.
 
 ## Bench numbers (26 gallery images, 256px GT crop -> 64px -> 4x)
 
