@@ -237,3 +237,15 @@ Overall tracker: ../RUST-REMAKE.md
 - [ ] Telemetry-driven re-fit of analyzer thresholds once data arrives
       (`pixelboost telemetry report`).
 - [ ] Pale anime skin still shares palette colours at low widths.
+
+## 5.8 (2026-11-24): cloud worker removed
+
+- [x] `crates/pb-worker` deleted; `Budget.cloud`, FFI cloud jobs, CLI
+      `--cloud` removed. Tests: workspace `cargo test --no-fail-fast`
+      green, live bridge e2e (server_client, telemetry_e2e) green.
+- [ ] 5.7 telemetry follow-ups from day one: iPhone14,5 (A15, 4 GB) ran
+      at thermal "serious" with GPU slower than CPU (216 vs 236 GFLOP/s);
+      8x upscales spend ~half their time in post (post_ms 33 s of 72 s).
+- [ ] Pre-existing clippy lints with the newer toolchain (is_multiple_of,
+      as_chunks, needless_range_loop) — style only.
+

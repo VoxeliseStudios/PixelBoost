@@ -6,11 +6,11 @@ import UIKit
 /// only tracks file URLs.
 @MainActor
 final class AppModel: ObservableObject {
-    enum Mode: Hashable { case upscale, edit, cloud }
+    enum Mode: Hashable { case upscale, edit, library }
 
     @Published var mode: Mode = .upscale
     @Published var showSettings = false
-    /// Short confirmation shown over the canvas ("Sent to Cloud").
+    /// Short confirmation shown over the canvas ("Saved to Photos").
     @Published var toast: String?
     /// Current working image file.
     @Published private(set) var current: URL?

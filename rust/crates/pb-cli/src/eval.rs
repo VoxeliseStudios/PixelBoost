@@ -19,14 +19,13 @@ pub fn upscale_cmd(args: &[String]) -> Result<(), String> {
     let model = flag(args, "--model").unwrap_or("auto");
     let img = Image::open(&args[1])?;
     // `--smart`: resolve everything from the photo like the app does
-    // (`--gflops`, `--seconds`, `--cloud` set the budget).
+    // (`--gflops`, `--seconds` set the budget).
     if args.iter().any(|a| a == "--smart") {
         let m = pb_core::analyze::measure(&img);
         let b = pb_core::analyze::Budget {
             gflops: flag(args, "--gflops").and_then(|v| v.parse().ok()).unwrap_or(40.0),
             max_seconds: flag(args, "--seconds").and_then(|v| v.parse().ok()).unwrap_or(180.0),
             max_output_mp: 120.0,
-            cloud: args.iter().any(|a| a == "--cloud"),
         };
         let r = pb_core::analyze::recommend(&m, b);
         eprintln!("smart: {} {}x prescale {:.2} {} detail {:.2} denoise {:.2} quality {} realism {:.2} adaptive {} (~{:.0}s)", r.model, r.scale, r.prescale, r.fidelity, r.detail, r.denoise, r.ensemble, r.realism, r.adaptive, r.est_seconds);

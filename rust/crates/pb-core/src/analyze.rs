@@ -87,13 +87,11 @@ pub struct Budget {
     pub max_seconds: f32,
     /// Output cap in megapixels.
     pub max_output_mp: f32,
-    /// Running on the server: the budget is not a phone's.
-    pub cloud: bool,
 }
 
 impl Default for Budget {
     fn default() -> Self {
-        Budget { gflops: 40.0, max_seconds: 180.0, max_output_mp: 120.0, cloud: false }
+        Budget { gflops: 40.0, max_seconds: 180.0, max_output_mp: 120.0 }
     }
 }
 
@@ -492,13 +490,13 @@ pub fn recommend_fixed(m: &Measures, b: Budget, fx: &Fixed) -> Recommendation {
     };
 
     // ---- budget: fall back to a cheaper network when the phone would take
-    // too long (the cloud has no such limit).
+    // too long.
     let est = |model: &str, ens: usize| -> f32 { (gflop(model, ew, eh, net_scale, ens) / b.gflops.max(1.0) as f64) as f32 };
     // Adaptive fusion (Photo where the source has texture, Clean on skin
     // and flat areas) costs two networks: use it when it fits the budget.
     let mut adaptive = false;
     let mut realism = 1.0f32;
-    let fits_fused = |e: usize| b.cloud || est("photo", 2 * e) <= b.max_seconds;
+    let fits_fused = |e: usize| est("photo", 2 * e) <= b.max_seconds;
     if portrait && !very_noisy {
         if fits_fused(1) {
             model = "photo";
@@ -508,12 +506,12 @@ pub fn recommend_fixed(m: &Measures, b: Budget, fx: &Fixed) -> Recommendation {
         } else {
             why.push(format!("Skin tones fill {}% of the middle → Clean model (no invented skin texture)", pct(m.skin)));
         }
-    } else if model == "photo" && (b.cloud || m.flat > 0.3) && fits_fused(1) {
+    } else if model == "photo" && m.flat > 0.3 && fits_fused(1) {
         adaptive = true;
-        why.push(if m.flat > 0.3 { "Large smooth areas (sky, walls) → Adaptive keeps them clean while texture gets rebuilt".to_string() } else { "Adaptive: texture rebuilt only where the photo has it".to_string() });
+        why.push("Large smooth areas (sky, walls) → Adaptive keeps them clean while texture gets rebuilt".to_string());
     }
     let cost = |model: &str, ens: usize, ad: bool| if ad { est("photo", 2 * ens) } else { est(model, ens) };
-    if !b.cloud && cost(model, 1, adaptive) > b.max_seconds {
+    if cost(model, 1, adaptive) > b.max_seconds {
         let cheaper = if anime { "lineart" } else { "fast" };
         if cheaper != model {
             why.push(format!("{} would take ~{} on this iPhone → {} model instead", models::find(model).map(|i| i.name).unwrap_or(model), fmt_secs(cost(model, 1, adaptive)), models::find(cheaper).map(|i| i.name).unwrap_or(cheaper)));
@@ -578,9 +576,6 @@ pub fn recommend_fixed(m: &Measures, b: Budget, fx: &Fixed) -> Recommendation {
     let mut ensemble = 1;
     if let Some(e) = fx.ensemble.filter(|e| *e > 0) {
         ensemble = e;
-    } else if b.cloud {
-        // The server has time: all 8 passes when the network input is small.
-        ensemble = if ew * eh <= 400_000 { 8 } else { 2 };
     } else {
         for e in [8usize, 2] {
             let limit = if e == 8 { 0.25 } else { 0.5 };
@@ -600,7 +595,7 @@ pub fn recommend_fixed(m: &Measures, b: Budget, fx: &Fixed) -> Recommendation {
         why.push("Dark photo but clean — no denoise needed".into());
     }
 
-    let est_seconds = if b.cloud { 0.0 } else { cost(model, ensemble, adaptive) };
+    let est_seconds = cost(model, ensemble, adaptive);
     let what = if anime {
         "Drawn art"
     } else if very_noisy {
@@ -668,7 +663,6 @@ fn report(m: &Measures, b: Budget, fx: &Fixed, r: &Recommendation) {
         .metric("budget.gflops", b.gflops)
         .metric("budget.seconds", b.max_seconds)
         .metric("budget.max_mp", b.max_output_mp)
-        .flag("budget.cloud", b.cloud)
         .metric("fixed.n", fixed.len() as f64)
         .tag("fixed", fixed.join(","))
         .emit();
@@ -813,8 +807,6 @@ mod tests {
         let slow = recommend(&m, Budget { gflops: 20.0, ..Budget::default() });
         assert!(!slow.adaptive);
         assert_ne!(slow.model, "photo");
-        let cloud = recommend(&m, Budget { cloud: true, ..Budget::default() });
-        assert!(cloud.adaptive);
     }
 }
 

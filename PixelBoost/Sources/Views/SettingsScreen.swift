@@ -64,7 +64,7 @@ struct SettingsScreen: View {
                     Button("Test connection") { test() }
                     if let health { Text(health).font(.caption).foregroundStyle(Theme.dim) }
                 } header: { Text("Server") } footer: {
-                    Text("PixelBoost Cloud upscales run on the PixelBoost server through this address; results are kept 7 days. On-device upscales never leave the phone.")
+                    Text("Used for model downloads, temporary uploads and anonymous telemetry. Upscaling always runs on this iPhone.")
                 }
                 Section("Temporary uploads (24h)") {
                     Button("Refresh") { refreshExports() }

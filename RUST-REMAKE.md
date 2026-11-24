@@ -209,7 +209,28 @@ dehalo, PatchMatch healing, batch edits, model compare + loupe, animated
 and video upscaling with temporal stabilisation, iOS 26 continued
 processing, pixel art palettes / star test / skin weight, arc-length rings.
 
-## Bench numbers (26 gallery images, 256px GT crop -> 64px -> 4x)
+## 5.8 — PixelBoost Cloud removed, on-device only (2026-11-24)
+
+Telemetry from the first 5.7 day showed the cloud path was the problem:
+jobs on the home-PC worker took 1 h (512 px, 8x Max) and 3.9 h (12 MP,
+2x High) at 28-42 s per tile while the PC itself was pinned at ~600% CPU,
+and a worker restart lost one user's 5 queued jobs. Every on-device run
+(12 of 12) and every GPU self-check succeeded. So "send to PC" is gone:
+
+- [x] Worker removed from the PC: container, image, `worker/`,
+      `crates/pb-worker`, /mnt/fastssd/pixelboost-jobs, gamemode hooks,
+      ufw rule for :8095.
+- [x] Bridge (2.1.0): `/jobs*` answers 410 with "PixelBoost Cloud has been
+      retired. Update PixelBoost" (5.7 apps still poll it); no worker
+      telemetry pull; JOBS_UPSTREAM / WORKER_KEY dropped. Telemetry
+      device_id fix: a `tags.device` (GPU name on gpu events) no longer
+      replaces the phone's device id.
+- [x] Core: `analyze::Budget.cloud`, FFI `CloudJob` + job calls,
+      `DownloadListener`, analyze/resolve `cloud` argument, CLI `--cloud`.
+- [x] App: Cloud tab → Library (on-device history + Batch), upscale sheet
+      without the This iPhone / Cloud choice, cloud BG refresh task gone.
+
+, 256px GT crop -> 64px -> 4x)
 
 Final settings (`pixelboost eval testimages/src OUT --crop 256`):
 
@@ -243,7 +264,7 @@ cargo build --release
 ./target/release/pixelboost gpu-tune tune.json
 ./target/release/pixelboost upscale in.jpg out.png --model photo --adaptive [--realism 0.8]
 ./target/release/pixelboost eval testimages/src /tmp/eval --only photo,clean --variants r0.5,fusion
-./target/release/pixelboost analyze testimages/src/* [-v] [--gflops 40] [--seconds 180] [--cloud]
+./target/release/pixelboost analyze testimages/src/* [-v] [--gflops 40] [--seconds 180]
 ./target/release/pixelboost shape in.jpg out.png heart '[{"style":"neon","width":0.03}]'
 ./target/release/pixelboost replace original.heic upscaled.png out   # -> out.jpg
 ./target/release/pixelboost edit in.png out.png 'pixel:starlight:{"width":128,"sparkle":0}'   # pixel art style + overrides

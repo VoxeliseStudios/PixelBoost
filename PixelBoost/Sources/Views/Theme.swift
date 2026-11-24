@@ -147,7 +147,7 @@ struct EmptyPhotoState: View {
                 Image(systemName: "sparkles").font(.system(size: 54, weight: .light)).foregroundStyle(Theme.energy)
             }
             Text(title).font(.title.weight(.bold))
-            Text("Upscale on this iPhone, or send it to PixelBoost Cloud and close the app — the full-resolution result waits for you.")
+            Text("Upscale and edit right on this iPhone — your photos never leave it.")
                 .font(.subheadline).foregroundStyle(Theme.dim).multilineTextAlignment(.center).padding(.horizontal, 12)
             PhotoPickerButton()
             HStack(spacing: 12) {

@@ -5,7 +5,7 @@
 //! labels (`tags`) and a duration, grouped by `system` + `name`. Where the
 //! events go is decided by whoever installed a [`Sink`]: the app queues
 //! them on disk and uploads batches to its server (pb-ffi `Telemetry`), the
-//! cloud worker posts them, the CLI prints or saves them. Without a sink an
+//! CLI prints or saves them. Without a sink an
 //! event costs one atomic load.
 //!
 //! Events never contain pixels, file names or anything typed by the user;
@@ -328,7 +328,7 @@ pub fn flush_aggregates() {
     }
 }
 
-/// Collects events in memory (CLI, tests, the worker's batcher).
+/// Collects events in memory (CLI, tests).
 #[derive(Default)]
 pub struct Collector {
     pub events: Mutex<Vec<Event>>,

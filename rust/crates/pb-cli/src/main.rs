@@ -22,7 +22,7 @@ fn usage() -> ! {
                                        degrade -> upscale -> compare with original
   edit <in> <out> <op json | @file.json | preset:id | pixel:style[:json]>   run an editing op (timed)
   presets                              list built-in presets
-  analyze <images...> [--gflops g] [--seconds s] [--cloud] [--degrade soft|noise|jpeg]
+  analyze <images...> [--gflops g] [--seconds s] [--degrade soft|noise|jpeg]
                                        measure photos, print the smart settings
   replace <original> <result> <out base>   result + original's EXIF/ICC (JPEG/PNG)
   shape <in> <out.png> <shape> [ring json]  shape crop with rings
@@ -355,7 +355,6 @@ fn analyze_cmd(args: &[String]) -> Result<(), String> {
         gflops: flag(args, "--gflops").and_then(|v| v.parse().ok()).unwrap_or(40.0),
         max_seconds: flag(args, "--seconds").and_then(|v| v.parse().ok()).unwrap_or(180.0),
         max_output_mp: 120.0,
-        cloud: args.iter().any(|a| a == "--cloud"),
     };
     let how = flag(args, "--degrade").unwrap_or("");
     let verbose = args.iter().any(|a| a == "-v");

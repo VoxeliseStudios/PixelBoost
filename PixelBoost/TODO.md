@@ -110,3 +110,16 @@ operation is a call into PixelBoostCore (Rust).
       only type-checks the Rust API calls, `swiftc -parse` the rest).
 - [ ] On device: video export of a 1080p clip, BG task progress UI, loupe
       feel, compare grid speed.
+
+## 5.8 cloud removed (2026-11-24)
+
+- [x] `CloudStore` / `CloudScreen` deleted; Cloud tab is now Library
+      (`Views/LibraryScreen.swift`: on-device history + Batch button).
+- [x] Upscale sheet: "On this iPhone" card with the estimate instead of
+      the This iPhone / Cloud picker; `up.where` setting dropped.
+- [x] Info.plist: `com.pixelboost.cloudcheck` BG task id removed
+      (UIBackgroundModes `fetch` kept, unchanged from 5.7).
+- [ ] Old Documents/Cloud folder (downloaded cloud results from 5.x) is
+      left in place: could be listed in Library or cleaned up later.
+- [ ] Verify on device: Library tab, Batch from Library, upscale sheet.
+

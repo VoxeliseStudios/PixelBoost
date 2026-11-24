@@ -6,7 +6,6 @@ struct PixelBoostApp: App {
     @Environment(\.scenePhase) private var scenePhase
 
     init() {
-        CloudStore.register()
         Task { @MainActor in Feedback.start() }
     }
 
@@ -25,7 +24,6 @@ struct PixelBoostApp: App {
             Core.engine.setGpuPaused(paused: phase != .active && !BackgroundRun.gpuGranted)
             if phase == .background { Feedback.flushSoon() }
             if phase == .active { app.pickUpSharedPhoto() }
-            if phase == .background, CloudStore.shared.activeCount > 0 { CloudStore.scheduleRefresh() }
         }
     }
 }

@@ -25,8 +25,8 @@ older app builds keep working.
   (export: system / name / run / device_id / hours / after_id), `GET /log/telemetry/summary?days=`,
   `GET /log/telemetry/feedback?by=model`, `POST /log/telemetry/sample` (opt-in crops),
   `GET /log/telemetry/samples`, `GET /log/telemetry/sample/{id}/source|result`.
-  Events older than 180 days and samples older than 30 are deleted hourly. The cloud worker's
-  events are pulled from `{JOBS_UPSTREAM}/telemetry/drain` every minute.
+  Events older than 180 days and samples older than 30 are deleted hourly.
+- `/jobs*` answers 410 Gone: PixelBoost Cloud (server-side upscaling) was removed in 5.8.
 - `GET /models/file/{name}`: optional model downloads from `MODEL_FILES_DIR` (Range supported).
 
 All but `/health` require `Authorization: Bearer $UPSCALER_BRIDGE_API_KEY`

@@ -376,7 +376,7 @@ impl PixelBoostCore {
         let asked = settings.clone();
         // Anything still on Auto is decided from the photo (with a default
         // phone budget; the app resolves with its learned speed first).
-        let settings = if smart::has_auto(&settings) { self.resolve(input_path.clone(), settings, 40.0, 180.0, false)?.settings } else { settings };
+        let settings = if smart::has_auto(&settings) { self.resolve(input_path.clone(), settings, 40.0, 180.0)?.settings } else { settings };
         let t_load = std::time::Instant::now();
         let img = Image::open(&input_path)?;
         let load_ms = t_load.elapsed().as_secs_f64() * 1000.0;

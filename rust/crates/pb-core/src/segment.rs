@@ -2,7 +2,7 @@
 //! the system's subject lift).
 //!
 //! - **Fast** (bundled): U²-Net-p, 1.1 M parameters, 320 px input.
-//! - **HQ** (download / cloud): IS-Net general use, 44 M parameters,
+//! - **HQ** (download): IS-Net general use, 44 M parameters,
 //!   1024 px input — much finer hair and holes.
 //!
 //! The network sees a square copy; its saliency map is stretched to 0..1,

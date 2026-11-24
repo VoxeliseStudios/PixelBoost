@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// The upscale choices, persisted. Shared by the sheet, batch and cloud.
+/// The upscale choices, persisted. Shared by the sheet and batch.
 struct UpscaleChoice: DynamicProperty {
     @AppStorage("up.model") var model = "auto"
     @AppStorage("up.scale") var scale = 4.0
@@ -16,7 +16,6 @@ struct UpscaleChoice: DynamicProperty {
     @AppStorage("up.realism") var realism = 1.0
     /// Photo model: also run Clean and mix per pixel by the photo's texture.
     @AppStorage("up.adaptive") var adaptive = false
-    @AppStorage("up.where") var whereTo = "device"
     /// Learned speed of this phone (GFLOP/s).
     @AppStorage("up.gflops") var gflops = 40.0
     /// Let the Rust analyzer choose every setting per photo.
@@ -30,31 +29,22 @@ struct UpscaleChoice: DynamicProperty {
                         realism: Float(realism), adaptive: adaptive, prescale: 0, dehalo: -1)
     }
 
-    /// Settings for the server worker.
-    var cloudSettings: [String: Any] { Self.cloudSettings(settings) }
-
-    static func cloudSettings(_ s: UpscaleSettings) -> [String: Any] {
-        ["model": s.model, "scale": Double(s.scale), "fidelity": s.fidelity, "detail": Double(s.detail), "denoise": Double(s.denoise),
-         "ensemble": Int(s.ensemble), "format": "png", "realism": Double(s.realism), "adaptive": s.adaptive,
-         "prescale": Double(s.prescale), "dehalo": Double(s.dehalo)]
-    }
-
-    /// Smart analysis of a photo for where it will run (cached per photo).
-    func analysis(for url: URL, cloud: Bool) async -> PhotoAnalysis? {
-        await SmartCache.shared.analysis(for: url, cloud: cloud, gflops: gflops, maxWait: maxWait)
+    /// Smart analysis of a photo for this phone (cached per photo).
+    func analysis(for url: URL) async -> PhotoAnalysis? {
+        await SmartCache.shared.analysis(for: url, gflops: gflops, maxWait: maxWait)
     }
 
     /// The manual settings with everything left on Auto decided from this
     /// photo (real resolution, content, noise, blocks, softness, budget).
-    func manualAnalysis(for url: URL, cloud: Bool) async -> PhotoAnalysis? {
-        await SmartCache.shared.resolve(url, settings: settings, cloud: cloud, gflops: gflops, maxWait: maxWait)
+    func manualAnalysis(for url: URL) async -> PhotoAnalysis? {
+        await SmartCache.shared.resolve(url, settings: settings, gflops: gflops, maxWait: maxWait)
     }
 
     /// Settings to run with: Smart's for this photo, else the manual ones
     /// with their Auto fields filled in from the photo.
-    func resolved(for url: URL, cloud: Bool) async -> UpscaleSettings {
-        if smart, let a = await analysis(for: url, cloud: cloud) { return a.settings }
-        if let a = await manualAnalysis(for: url, cloud: cloud) { return a.settings }
+    func resolved(for url: URL) async -> UpscaleSettings {
+        if smart, let a = await analysis(for: url) { return a.settings }
+        if let a = await manualAnalysis(for: url) { return a.settings }
         return settings
     }
 
@@ -92,7 +82,7 @@ struct UpscaleChoice: DynamicProperty {
     static func name(_ id: String) -> String { models.first { $0.id == id }?.name ?? id }
 }
 
-/// Smart analyses, one per (photo, where, budget). The analysis reads the
+/// Smart analyses, one per (photo, budget). The analysis reads the
 /// whole photo, so it runs once and off the main thread.
 @MainActor
 final class SmartCache {
@@ -100,14 +90,14 @@ final class SmartCache {
     private var done: [String: PhotoAnalysis] = [:]
     private var running: [String: Task<PhotoAnalysis?, Never>] = [:]
 
-    func analysis(for url: URL, cloud: Bool, gflops: Double, maxWait: Double) async -> PhotoAnalysis? {
-        let key = "\(url.path)|\(cloud)|\(Int(gflops / 5))|\(Int(maxWait))"
+    func analysis(for url: URL, gflops: Double, maxWait: Double) async -> PhotoAnalysis? {
+        let key = "\(url.path)|\(Int(gflops / 5))|\(Int(maxWait))"
         if let a = done[key] { return a }
         if let t = running[key] { return await t.value }
         let path = url.path
         let budget = Float(maxWait <= 0 ? 1e9 : maxWait)
         let t = Task.detached(priority: .userInitiated) { () -> PhotoAnalysis? in
-            try? Core.engine.analyze(inputPath: path, deviceGflops: Float(gflops), maxSeconds: budget, maxOutputMp: 120, cloud: cloud)
+            try? Core.engine.analyze(inputPath: path, deviceGflops: Float(gflops), maxSeconds: budget, maxOutputMp: 120)
         }
         running[key] = t
         let a = await t.value
@@ -120,14 +110,14 @@ final class SmartCache {
     }
 
     /// Manual settings with their Auto fields resolved (cached per choice).
-    func resolve(_ url: URL, settings s: UpscaleSettings, cloud: Bool, gflops: Double, maxWait: Double) async -> PhotoAnalysis? {
-        let key = "r|\(url.path)|\(cloud)|\(Int(gflops / 5))|\(Int(maxWait))|\(s.model)|\(s.scale)|\(s.fidelity)|\(s.detail)|\(s.ensemble)|\(s.denoise)|\(s.realism)|\(s.adaptive)"
+    func resolve(_ url: URL, settings s: UpscaleSettings, gflops: Double, maxWait: Double) async -> PhotoAnalysis? {
+        let key = "r|\(url.path)|\(Int(gflops / 5))|\(Int(maxWait))|\(s.model)|\(s.scale)|\(s.fidelity)|\(s.detail)|\(s.ensemble)|\(s.denoise)|\(s.realism)|\(s.adaptive)"
         if let a = done[key] { return a }
         if let t = running[key] { return await t.value }
         let path = url.path
         let budget = Float(maxWait <= 0 ? 1e9 : maxWait)
         let t = Task.detached(priority: .userInitiated) { () -> PhotoAnalysis? in
-            try? Core.engine.resolve(inputPath: path, settings: s, deviceGflops: Float(gflops), maxSeconds: budget, cloud: cloud)
+            try? Core.engine.resolve(inputPath: path, settings: s, deviceGflops: Float(gflops), maxSeconds: budget)
         }
         running[key] = t
         let a = await t.value

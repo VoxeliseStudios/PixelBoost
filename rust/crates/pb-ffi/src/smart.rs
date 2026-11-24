@@ -54,20 +54,20 @@ pub struct Replacement {
 impl PixelBoostCore {
     /// Look at the photo and choose every upscale setting for it.
     /// `device_gflops`: measured phone speed; `max_seconds`: longest run the
-    /// user accepts on the phone; `cloud`: plan for the server instead.
-    pub fn analyze(&self, input_path: String, device_gflops: f32, max_seconds: f32, max_output_mp: f32, cloud: bool) -> Result<PhotoAnalysis, PbError> {
+    /// user accepts on the phone.
+    pub fn analyze(&self, input_path: String, device_gflops: f32, max_seconds: f32, max_output_mp: f32) -> Result<PhotoAnalysis, PbError> {
         let m = analyze::measure_file(&input_path)?;
-        Ok(analysis(&m, budget(device_gflops, max_seconds, max_output_mp, cloud), &analyze::Fixed::default(), max_output_mp))
+        Ok(analysis(&m, budget(device_gflops, max_seconds, max_output_mp), &analyze::Fixed::default(), max_output_mp))
     }
 
     /// Fill in every setting left on Auto (model "auto", scale <= 0,
     /// clarity "auto", detail < 0, quality 0, prescale 0) from the photo,
     /// keeping the ones the user set. The analysis looks at the pixels:
     /// real resolution, drawn vs photo, noise, JPEG blocks, softness, skin.
-    pub fn resolve(&self, input_path: String, settings: UpscaleSettings, device_gflops: f32, max_seconds: f32, cloud: bool) -> Result<PhotoAnalysis, PbError> {
+    pub fn resolve(&self, input_path: String, settings: UpscaleSettings, device_gflops: f32, max_seconds: f32) -> Result<PhotoAnalysis, PbError> {
         let m = analyze::measure_file(&input_path)?;
         let mo = if settings.max_output_mp > 0.0 { settings.max_output_mp } else { 120.0 };
-        let mut a = analysis(&m, budget(device_gflops, max_seconds, mo, cloud), &fixed_of(&settings), mo);
+        let mut a = analysis(&m, budget(device_gflops, max_seconds, mo), &fixed_of(&settings), mo);
         a.settings.tile = settings.tile.max(32);
         Ok(a)
     }
@@ -111,8 +111,8 @@ impl PixelBoostCore {
     }
 }
 
-fn budget(gflops: f32, max_seconds: f32, max_output_mp: f32, cloud: bool) -> Budget {
-    Budget { gflops: gflops.max(1.0), max_seconds: max_seconds.max(5.0), max_output_mp, cloud }
+fn budget(gflops: f32, max_seconds: f32, max_output_mp: f32) -> Budget {
+    Budget { gflops: gflops.max(1.0), max_seconds: max_seconds.max(5.0), max_output_mp }
 }
 
 /// The user's fixed choices in `s` (Auto sentinels become `None`).

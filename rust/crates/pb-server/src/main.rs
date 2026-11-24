@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-const VERSION: &str = "2.0.0";
+const VERSION: &str = "2.1.0";
 const MAX_UPLOAD_BYTES: usize = 60 * 1024 * 1024;
 const DEFAULT_TTL_HOURS: i64 = 24;
 const MAX_TTL_HOURS: i64 = 24 * 7;
@@ -25,45 +25,17 @@ const MAX_TTL_HOURS: i64 = 24 * 7;
 struct App {
     db: PgPool,
     api_key: Arc<String>,
-    /// Upscale worker (pixelboost-worker) base URL and its key; `/jobs*`
-    /// requests are streamed through to it.
-    jobs_upstream: Arc<String>,
-    worker_key: Arc<String>,
-    http: reqwest::Client,
     /// Folder of optional model files served at /models/file/{name}.
     model_files: Arc<String>,
 }
 
-// ---------------------------------------------------------------- jobs proxy
+// ---------------------------------------------------------------- retired cloud jobs
 
-async fn jobs_proxy(State(app): State<App>, req: Request) -> Response {
-    if app.jobs_upstream.is_empty() {
-        return err(StatusCode::SERVICE_UNAVAILABLE, "Server upscaling is not configured").into_response();
-    }
-    let pq = req.uri().path_and_query().map(|p| p.as_str().to_string()).unwrap_or_default();
-    let url = format!("{}{pq}", app.jobs_upstream.trim_end_matches('/'));
-    let method = req.method().clone();
-    let mut rb = app.http.request(method, url).header("x-worker-key", app.worker_key.as_str());
-    for h in [header::CONTENT_TYPE, header::CONTENT_LENGTH, header::RANGE] {
-        if let Some(v) = req.headers().get(&h) {
-            rb = rb.header(h.as_str(), v.as_bytes());
-        }
-    }
-    let body = reqwest::Body::wrap_stream(req.into_body().into_data_stream());
-    let resp = match rb.body(body).send().await {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("jobs proxy: {e}");
-            return err(StatusCode::SERVICE_UNAVAILABLE, "The upscale server is offline right now").into_response();
-        }
-    };
-    let mut out = Response::builder().status(resp.status().as_u16());
-    for h in ["content-type", "content-length", "content-range", "accept-ranges", "content-disposition"] {
-        if let Some(v) = resp.headers().get(h) {
-            out = out.header(h, v.as_bytes());
-        }
-    }
-    out.body(axum::body::Body::from_stream(resp.bytes_stream())).unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response())
+/// PixelBoost Cloud (server-side upscaling on the home PC) was removed in
+/// 5.8: upscaling runs only on the phone. Apps up to 5.7 still call
+/// `/jobs*`; tell them why instead of looking offline.
+async fn jobs_retired() -> ApiError {
+    err(StatusCode::GONE, "PixelBoost Cloud has been retired. Update PixelBoost: upscaling now runs on your iPhone.")
 }
 
 // ---------------------------------------------------------------- errors
@@ -561,13 +533,12 @@ async fn log_telemetry(State(app): State<App>, Json(body): Json<Value>) -> R {
     Ok(Json(json!({"inserted": n})))
 }
 
-/// Insert an event array; an event's `tags.device` (worker events carry the
-/// device that sent the job) overrides `device`.
+/// Insert an event array sent by one device.
 #[allow(clippy::too_many_arguments)]
 async fn insert_events(db: &PgPool, device: Option<String>, session: Option<String>, app_version: Option<String>, os: Option<String>, model: Option<String>, source: String, events: &Value) -> Result<u64, ApiError> {
     let r = sqlx::query(
         "INSERT INTO telemetry_events (device_id, session_id, run_id, ts, system, name, duration_ms, metrics, tags, app_version, os_version, device_model, source)
-         SELECT left(COALESCE(NULLIF(e->'tags'->>'device', ''), $1), 64), $2, NULLIF(left(e->>'run', 36), ''),
+         SELECT left($1, 64), $2, NULLIF(left(e->>'run', 36), ''),
                 CASE WHEN jsonb_typeof(e->'ts') = 'number' AND (e->>'ts')::float8 BETWEEN 1.5e9 AND 4e9
                      THEN to_timestamp((e->>'ts')::float8) AT TIME ZONE 'UTC' ELSE LOCALTIMESTAMP END,
                 left(COALESCE(e->>'system', '?'), 40), left(COALESCE(e->>'name', '?'), 60),
@@ -588,36 +559,6 @@ async fn insert_events(db: &PgPool, device: Option<String>, session: Option<Stri
     .execute(db)
     .await?;
     Ok(r.rows_affected())
-}
-
-/// Every minute: pull the cloud worker's telemetry into the database.
-async fn pull_worker_telemetry(app: App) {
-    if app.jobs_upstream.is_empty() {
-        return;
-    }
-    loop {
-        tokio::time::sleep(Duration::from_secs(60)).await;
-        loop {
-            let url = format!("{}/telemetry/drain", app.jobs_upstream.trim_end_matches('/'));
-            let resp = app.http.get(&url).header("X-Worker-Key", app.worker_key.as_str()).timeout(Duration::from_secs(20)).send().await;
-            let Ok(resp) = resp else { break };
-            if !resp.status().is_success() {
-                break;
-            }
-            let Ok(bytes) = resp.bytes().await else { break };
-            let Ok(v) = serde_json::from_slice::<Value>(&bytes) else { break };
-            let n = v["events"].as_array().map(|a| a.len()).unwrap_or(0);
-            if n > 0 {
-                if let Err(e) = insert_events(&app.db, Some("worker".into()), None, Some(format!("worker {VERSION}")), None, Some("pixelboost-worker".into()), "worker".into(), &v["events"]).await {
-                    eprintln!("worker telemetry: insert failed: {:?}", e.1);
-                    break;
-                }
-            }
-            if v["remaining"].as_u64().unwrap_or(0) == 0 {
-                break;
-            }
-        }
-    }
 }
 
 fn opt(q: &HashMap<String, String>, k: &str) -> Option<String> {
@@ -991,13 +932,9 @@ async fn main() {
         .await
         .expect("connect to Postgres");
     init_db(&db).await.expect("schema migration");
-    let http = reqwest::Client::builder().connect_timeout(Duration::from_secs(5)).build().expect("http client");
     let app = App {
         db: db.clone(),
         api_key: Arc::new(env("UPSCALER_BRIDGE_API_KEY", "")),
-        jobs_upstream: Arc::new(env("JOBS_UPSTREAM", "")),
-        worker_key: Arc::new(env("WORKER_KEY", "")),
-        http,
         model_files: Arc::new(env("MODEL_FILES_DIR", "")),
     };
 
@@ -1009,8 +946,6 @@ async fn main() {
             tokio::time::sleep(Duration::from_secs(3600)).await;
         }
     });
-
-    tokio::spawn(pull_worker_telemetry(app.clone()));
 
     let router = Router::new()
         .route("/health", get(health))
@@ -1061,8 +996,8 @@ async fn main() {
         .route("/device-settings", put(put_device_settings).get(get_device_settings))
         .route("/models", get(list_models))
         .route("/models/file/{name}", get(model_file))
-        .route("/jobs", any(jobs_proxy))
-        .route("/jobs/{*rest}", any(jobs_proxy))
+        .route("/jobs", any(jobs_retired))
+        .route("/jobs/{*rest}", any(jobs_retired))
         .layer(middleware::from_fn_with_state(app.clone(), auth))
         .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES + 1024 * 1024))
         .with_state(app);

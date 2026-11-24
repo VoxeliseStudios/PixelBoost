@@ -31,7 +31,7 @@ struct StudioView: View {
             }
         }
         .sheet(isPresented: $showSheet) {
-            UpscaleSheet(onDevice: startOnDevice, onCloud: sendToCloud)
+            UpscaleSheet(onDevice: startOnDevice)
                 .presentationDetents([.large])
                 .presentationBackground(Theme.ink)
         }
@@ -51,10 +51,10 @@ struct StudioView: View {
         .onChange(of: job.done) { _, d in
             background?.update(job.progress, subtitle: app.frames > 1 ? "Frame \(d) of \(job.total)" : "Tile \(d) of \(job.total)")
         }
-        .task(id: "\(app.current?.path ?? "")|\(choice.smart)|\(choice.whereTo)|\(choice.maxWait)") {
+        .task(id: "\(app.current?.path ?? "")|\(choice.smart)|\(choice.maxWait)") {
             smartSummary = nil
             guard choice.smart, let url = app.current else { return }
-            smartSummary = await choice.analysis(for: url, cloud: choice.whereTo == "cloud")?.summary
+            smartSummary = await choice.analysis(for: url)?.summary
         }
     }
 
@@ -111,7 +111,7 @@ struct StudioView: View {
         VStack(spacing: 10) {
             Button { showSheet = true } label: {
                 HStack(spacing: 10) {
-                    Image(systemName: choice.whereTo == "cloud" ? "cloud.fill" : "iphone")
+                    Image(systemName: "iphone")
                         .foregroundStyle(Theme.amber)
                     Text(summaryText).font(.subheadline.weight(.medium)).lineLimit(1)
                     Spacer()
@@ -123,9 +123,7 @@ struct StudioView: View {
                 .overlay(Capsule().stroke(Theme.line))
             }
             .buttonStyle(.plain)
-            PrimaryButton(title: choice.whereTo == "cloud" ? "Send to Cloud" : "Upscale", icon: choice.whereTo == "cloud" ? "icloud.and.arrow.up" : "wand.and.stars") {
-                choice.whereTo == "cloud" ? sendToCloud() : startOnDevice()
-            }
+            PrimaryButton(title: "Upscale", icon: "wand.and.stars") { startOnDevice() }
         }
     }
 
@@ -226,17 +224,6 @@ struct StudioView: View {
 
     // MARK: actions
 
-    private func sendToCloud() {
-        showSheet = false
-        guard let url = app.current else { return }
-        let asset = app.sourceAsset
-        Task {
-            let s = await choice.resolved(for: url, cloud: true)
-            let label = app.info.map { "\($0.width)×\($0.height) → \(Int(s.scale))×" } ?? ""
-            CloudStore.shared.send(url, settings: UpscaleChoice.cloudSettings(s), label: label, app: app, asset: asset)
-        }
-    }
-
     private func startOnDevice() {
         showSheet = false
         guard let url = app.current, let info = app.info else { return }
@@ -244,7 +231,7 @@ struct StudioView: View {
         resultPreview = nil
         UIApplication.shared.isIdleTimerDisabled = true
         Task {
-            let s = await choice.resolved(for: url, cloud: false)
+            let s = await choice.resolved(for: url)
             let scale = Double(s.scale)
             lastScale = s.scale
             rated = nil
@@ -263,7 +250,7 @@ struct StudioView: View {
             UIApplication.shared.isIdleTimerDisabled = false
             if let o, !choice.smart {
                 // Manual settings: record where they differ from Auto's pick.
-                Feedback.overrides(o.runId, auto: await choice.analysis(for: url, cloud: false)?.settings, used: s)
+                Feedback.overrides(o.runId, auto: await choice.analysis(for: url)?.settings, used: s)
             }
             Feedback.flushSoon()
             log(info: info, settings: s, outcome: o, ms: Int(Date().timeIntervalSince(began) * 1000))

@@ -60,8 +60,8 @@ struct BatchScreen: View {
                     }
                     if task == "upscale" {
                     Text(choice.smart
-                         ? "Runs on this iPhone. Smart settings look at each photo and choose its size, model and clean-up. For big batches, send them to PixelBoost Cloud instead."
-                         : "Runs on this iPhone with your upscale settings: \(UpscaleChoice.name(choice.model)), \(Int(choice.scale))×, \(choice.fidelity). For big batches, send them to PixelBoost Cloud instead.")
+                         ? "Runs on this iPhone. Smart settings look at each photo and choose its size, model and clean-up."
+                         : "Runs on this iPhone with your upscale settings: \(UpscaleChoice.name(choice.model)), \(Int(choice.scale))×, \(choice.fidelity).")
                         .font(.caption).foregroundStyle(Theme.dim)
                     } else {
                         Text("The same edits on every photo, at full resolution, on this iPhone.").font(.caption).foregroundStyle(Theme.dim)
@@ -140,7 +140,7 @@ struct BatchScreen: View {
                       let info = try? Core.engine.imageInfo(path: src.path) else { continue }
                 queue[i].status = "Upscaling…"
                 BatchActivity.update(activity, done: finished, total: queue.count, name: "Photo \(i + 1)")
-                let s = await choice.resolved(for: src, cloud: false)
+                let s = await choice.resolved(for: src)
                 let scale = Double(s.scale)
                 let o = await job.run(input: src, settings: s, base: nil,
                                       outW: Int(Double(info.width) * scale), outH: Int(Double(info.height) * scale))

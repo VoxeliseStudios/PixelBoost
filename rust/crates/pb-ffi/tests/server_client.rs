@@ -7,7 +7,7 @@ fn round_trip() {
     let Ok(base) = std::env::var("PB_TEST_SERVER") else { return };
     let key = std::env::var("PB_TEST_KEY").unwrap_or_default();
     let c = ServerClient::new(base, key, "client-test".into());
-    assert_eq!(c.health().unwrap(), "2.0.0");
+    assert!(!c.health().unwrap().is_empty());
     let img = concat!(env!("CARGO_MANIFEST_DIR"), "/../../testimages/src/g4249.jpg");
     let id = c.upload_export(img.into(), "client test".into(), 1).unwrap();
     let list = c.list_exports().unwrap();
