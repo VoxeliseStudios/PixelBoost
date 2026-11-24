@@ -30,6 +30,8 @@ struct App {
     jobs_upstream: Arc<String>,
     worker_key: Arc<String>,
     http: reqwest::Client,
+    /// Folder of optional model files served at /models/file/{name}.
+    model_files: Arc<String>,
 }
 
 // ---------------------------------------------------------------- jobs proxy
@@ -491,6 +493,54 @@ async fn cleanup_once(db: &PgPool) {
     }
 }
 
+// ---------------------------------------------------------------- model files (5.7)
+
+/// Optional model downloads (`MODEL_FILES_DIR`): `.pbnn` files only, by
+/// plain name, with Range support so the app can resume.
+async fn model_file(State(app): State<App>, Path(name): Path<String>, headers: HeaderMap) -> Response {
+    use axum::body::Body;
+    use axum::http::HeaderValue;
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+    let ok = name.ends_with(".pbnn") && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.') && !name.contains("..");
+    if !ok || app.model_files.is_empty() {
+        return err(StatusCode::NOT_FOUND, "Not found").into_response();
+    }
+    let path = std::path::Path::new(app.model_files.as_str()).join(&name);
+    let mut f = match tokio::fs::File::open(&path).await {
+        Ok(f) => f,
+        Err(_) => return err(StatusCode::NOT_FOUND, "Not found").into_response(),
+    };
+    let len = f.metadata().await.map(|m| m.len()).unwrap_or(0);
+    let (mut start, mut end, mut partial) = (0u64, len.saturating_sub(1), false);
+    if let Some(r) = headers.get(header::RANGE).and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("bytes=")) {
+        let mut it = r.splitn(2, '-');
+        if let Ok(s) = it.next().unwrap_or("").parse::<u64>() {
+            start = s;
+            if let Ok(e) = it.next().unwrap_or("").parse::<u64>() {
+                end = e.min(end);
+            }
+            partial = true;
+        }
+        if start > end || start >= len {
+            return (StatusCode::RANGE_NOT_SATISFIABLE, [(header::CONTENT_RANGE, format!("bytes */{len}"))]).into_response();
+        }
+    }
+    if start > 0 && f.seek(std::io::SeekFrom::Start(start)).await.is_err() {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, "seek failed").into_response();
+    }
+    let n = end - start + 1;
+    let mut resp = Response::new(Body::from_stream(tokio_util::io::ReaderStream::with_capacity(f.take(n), 256 * 1024)));
+    *resp.status_mut() = if partial { StatusCode::PARTIAL_CONTENT } else { StatusCode::OK };
+    let h = resp.headers_mut();
+    h.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/octet-stream"));
+    h.insert(header::CONTENT_LENGTH, HeaderValue::from(n));
+    h.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    if partial {
+        h.insert(header::CONTENT_RANGE, HeaderValue::from_str(&format!("bytes {start}-{end}/{len}")).unwrap());
+    }
+    resp
+}
+
 // ---------------------------------------------------------------- telemetry (5.7)
 
 const TM_MAX_EVENTS: usize = 2000;
@@ -948,6 +998,7 @@ async fn main() {
         jobs_upstream: Arc::new(env("JOBS_UPSTREAM", "")),
         worker_key: Arc::new(env("WORKER_KEY", "")),
         http,
+        model_files: Arc::new(env("MODEL_FILES_DIR", "")),
     };
 
     // Hourly expiry sweep.
@@ -1009,6 +1060,7 @@ async fn main() {
         .route("/presets/{id}", delete(delete_preset))
         .route("/device-settings", put(put_device_settings).get(get_device_settings))
         .route("/models", get(list_models))
+        .route("/models/file/{name}", get(model_file))
         .route("/jobs", any(jobs_proxy))
         .route("/jobs/{*rest}", any(jobs_proxy))
         .layer(middleware::from_fn_with_state(app.clone(), auth))

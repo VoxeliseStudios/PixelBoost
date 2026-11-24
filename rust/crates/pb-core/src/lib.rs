@@ -22,13 +22,14 @@ pub mod pipeline;
 pub mod pixelart;
 pub mod presets;
 pub mod resample;
+pub mod segment;
 pub mod shape;
 pub mod stream;
 pub mod strips;
 pub mod telemetry;
 pub mod text;
 
-pub use engine::{backend, gpu_name, gpu_note, gpu_speed, set_backend, set_gpu_tune_cache, Backend, Engine, TileEvent, TileOptions, Tuning};
+pub use engine::{locate, model_available, set_extra_model_dirs, backend, gpu_name, gpu_note, gpu_speed, set_backend, set_gpu_tune_cache, Backend, Engine, TileEvent, TileOptions, Tuning};
 pub use image::Image;
 
 /// Which SIMD convolution kernel is active.

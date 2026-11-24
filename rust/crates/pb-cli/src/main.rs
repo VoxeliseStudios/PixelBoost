@@ -26,6 +26,9 @@ fn usage() -> ! {
                                        measure photos, print the smart settings
   replace <original> <result> <out base>   result + original's EXIF/ICC (JPEG/PNG)
   shape <in> <out.png> <shape> [ring json]  shape crop with rings
+  cutout <in> <out.png> [--hq] [--model f] [--size n] [--mask m.png]   subject cutout
+  inspect <checkpoint.pth>             list a PyTorch checkpoint's tensors
+  quantize <in.pbnn> <out.pbnn>        int8 weights (.pbnn v2, half the size)
   telemetry pull <server> <out.jsonl> [--key k] [--system s] [--hours h]
   telemetry report <events.jsonl>       tuning reports (speed, feedback, Auto overrides, ...)
   (PB_TELEMETRY=file.jsonl records any command's engine events)"
@@ -52,6 +55,30 @@ pub fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
 fn convert(src: &Path, dst: &Path) -> Result<(), String> {
     let bytes = std::fs::read(src).map_err(|e| format!("{}: {e}", src.display()))?;
     let sd = pb_nn::pth::load_pth(&bytes).map_err(|e| e.to_string())?;
+    if let Some((variant, size)) = pb_nn::seg::detect(&sd) {
+        // Segmentation (U²-Net / IS-Net): fold BN, store as arch "u2net".
+        let folded = pb_nn::seg::fold(&sd)?;
+        let params: usize = folded.iter().map(|(_, t)| t.data.len()).sum();
+        let meta = serde_json::json!({
+            "source": src.file_name().unwrap().to_string_lossy(),
+            "params": params,
+            "license": if variant == "isnet" { "Apache-2.0 (DIS / IS-Net, Xuebin Qin et al.)" } else { "Apache-2.0 (U-2-Net, Xuebin Qin et al.)" },
+        });
+        // Folded BN weights need f32 (fp16 shifts the saliency); big ones
+        // ship as int8 with per-channel scales (PB_SEG_STORE=f32|q8|f16).
+        let cfg = serde_json::json!({"variant": variant, "size": size});
+        let f32file = pb_nn::pbm::write_f32("u2net", cfg.clone(), meta.clone(), &folded);
+        let store = std::env::var("PB_SEG_STORE").unwrap_or_else(|_| if params > 5_000_000 { "q8".into() } else { "f32".into() });
+        let out = match store.as_str() {
+            "q8" => pb_nn::pbm::quantize_q8(&pb_nn::pbm::read(&f32file)?).0,
+            "f16" => pb_nn::pbm::write("u2net", cfg, meta, &folded),
+            _ => f32file,
+        };
+        pb_nn::seg::SegNet::from_weights(&pb_nn::pbm::read(&out)?)?;
+        std::fs::write(dst, &out).map_err(|e| e.to_string())?;
+        println!("{} -> {} (u2net {variant}, {params} params, {:.1} MB)", src.display(), dst.display(), out.len() as f64 / 1e6);
+        return Ok(());
+    }
     let (arch, cfg) = pb_nn::arch::detect(&sd)?;
     let params: usize = sd.iter().map(|(_, t)| t.data.len()).sum();
     let meta = serde_json::json!({
@@ -76,6 +103,61 @@ fn main() {
     tele::init_from_env();
     let res = match args[0].as_str() {
         "telemetry" => tele::cmd(&args),
+        // seg-check <model.pbnn> <in.f32 (n*n*3 HWC)> <out.f32> <n>: raw network I/O for reference tests.
+        "seg-check" if args.len() >= 5 => (|| {
+            let net = pb_core::segment::load(Path::new(&args[1]))?;
+            let n: usize = args[4].parse().map_err(|_| "n")?;
+            let raw = std::fs::read(&args[2]).map_err(|e| e.to_string())?;
+            let v: Vec<f32> = raw.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+            let mut x = pb_nn::fmap::Fmap::new(n, n, 3);
+            for y in 0..n {
+                for xx in 0..n {
+                    x.px_mut(y, xx).copy_from_slice(&v[(y * n + xx) * 3..(y * n + xx) * 3 + 3]);
+                }
+            }
+            let o = net.forward(&x);
+            std::fs::write(&args[3], o.iter().flat_map(|f| f.to_le_bytes()).collect::<Vec<u8>>()).map_err(|e| e.to_string())
+        })(),
+        "cutout" if args.len() >= 3 => (|| {
+            let dir = models_dir(&args);
+            let file = if args.iter().any(|a| a == "--hq") { pb_core::segment::HQ_FILE } else { pb_core::segment::FAST_FILE };
+            let net = pb_core::segment::load(&flag(&args, "--model").map(PathBuf::from).unwrap_or_else(|| dir.join(file)))?;
+            let img = Image::open(&args[1])?;
+            let size = flag(&args, "--size").and_then(|v| v.parse().ok()).unwrap_or(0);
+            let t = Instant::now();
+            let refine = flag(&args, "--refine").and_then(|v| v.parse().ok()).unwrap_or(1.0);
+            let m = pb_core::segment::subject_mask(&net, &img, pb_core::segment::Options { size, refine });
+            let ms = t.elapsed().as_secs_f64() * 1000.0;
+            let mut out = img.clone();
+            for (p, a) in out.px.iter_mut().zip(&m) {
+                p[3] *= a;
+            }
+            out.save(&args[2])?;
+            if let Some(mp) = flag(&args, "--mask") {
+                pb_core::segment::save_mask(&m, img.w, img.h, mp)?;
+            }
+            println!("{}x{} {} cutout in {ms:.0} ms", img.w, img.h, net.variant);
+            Ok(())
+        })(),
+        "inspect" if args.len() >= 2 => (|| {
+            let b = std::fs::read(&args[1]).map_err(|e| e.to_string())?;
+            let sd = pb_nn::pth::load_pth(&b).map_err(|e| e.to_string())?;
+            let n: usize = sd.iter().map(|(_, t)| t.data.len()).sum();
+            for (k, t) in &sd {
+                println!("{k:<60} {:?}", t.shape);
+            }
+            println!("{} tensors, {n} params", sd.len());
+            Ok(())
+        })(),
+        "quantize" if args.len() >= 3 => (|| {
+            let w = pb_nn::pbm::read(&std::fs::read(&args[1]).map_err(|e| e.to_string())?)?;
+            let (b, worst) = pb_nn::pbm::quantize_q8(&w);
+            // Must load and build like the original.
+            pb_nn::build(&pb_nn::pbm::read(&b)?)?;
+            std::fs::write(&args[2], &b).map_err(|e| e.to_string())?;
+            println!("{} -> {} ({:.1} MB, worst weight error {:.2}% of channel range)", args[1], args[2], b.len() as f64 / 1e6, worst * 100.0);
+            Ok(())
+        })(),
         "convert" if args.len() >= 3 => convert(Path::new(&args[1]), Path::new(&args[2])),
         "convert-all" if args.len() >= 3 => {
             let (src, dst) = (Path::new(&args[1]), Path::new(&args[2]));

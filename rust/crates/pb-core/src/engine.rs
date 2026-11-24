@@ -133,8 +133,45 @@ pub struct TileEvent<'a> {
     pub tile: &'a Image,
 }
 
-fn read(dir: &Path, file: &str) -> Result<Weights, String> {
+static EXTRA_DIRS: std::sync::RwLock<Vec<std::path::PathBuf>> = std::sync::RwLock::new(Vec::new());
+
+/// More folders to look in for model files (downloaded models).
+pub fn set_extra_model_dirs(dirs: Vec<std::path::PathBuf>) {
+    *EXTRA_DIRS.write().unwrap() = dirs;
+}
+
+/// Where `file` is: `dir` first, then the extra folders.
+pub fn locate(dir: &Path, file: &str) -> Option<std::path::PathBuf> {
     let p = dir.join(file);
+    if p.exists() {
+        return Some(p);
+    }
+    EXTRA_DIRS.read().unwrap().iter().map(|d| d.join(file)).find(|p| p.exists())
+}
+
+static MAIN_DIR: std::sync::RwLock<Option<std::path::PathBuf>> = std::sync::RwLock::new(None);
+
+/// The bundled models folder (lets the analyzer avoid models that are
+/// optional downloads and not installed).
+pub fn set_models_dir(dir: &Path) {
+    *MAIN_DIR.write().unwrap() = Some(dir.to_path_buf());
+}
+
+/// Usable right now? (Always true when no models folder was registered.)
+pub fn usable(id: &str) -> bool {
+    match MAIN_DIR.read().unwrap().as_ref() {
+        Some(d) => model_available(d, id),
+        None => true,
+    }
+}
+
+/// Is this model's file available (bundled or downloaded)?
+pub fn model_available(dir: &Path, id: &str) -> bool {
+    models::find(id).map(|m| locate(dir, m.file).is_some()).unwrap_or(false)
+}
+
+fn read(dir: &Path, file: &str) -> Result<Weights, String> {
+    let p = locate(dir, file).ok_or_else(|| format!("model file {file} is not installed"))?;
     let bytes = std::fs::read(&p).map_err(|e| format!("{}: {e}", p.display()))?;
     pbm::read(&bytes)
 }

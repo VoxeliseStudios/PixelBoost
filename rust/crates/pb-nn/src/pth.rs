@@ -153,9 +153,16 @@ fn as_ints(v: &V) -> Result<Vec<usize>, PthError> {
 }
 
 fn unpickle(p: &[u8]) -> Result<V, PthError> {
+    let mut i = 0;
+    unpickle_at(p, &mut i)
+}
+
+/// Unpickle one object starting at `*pos`; `*pos` ends just past STOP
+/// (legacy checkpoints are several pickles back to back).
+fn unpickle_at(p: &[u8], pos: &mut usize) -> Result<V, PthError> {
     let mut st: Vec<V> = Vec::new();
     let mut memo: HashMap<usize, V> = HashMap::new();
-    let mut i = 0usize;
+    let mut i = *pos;
     macro_rules! pop {
         () => {
             match st.pop() {
@@ -179,7 +186,31 @@ fn unpickle(p: &[u8]) -> Result<V, PthError> {
         match op {
             0x80 => i += 1,                // PROTO
             0x95 => i += 8,                // FRAME
-            b'.' => return Ok(pop!()),     // STOP
+            b'.' => {
+                // STOP
+                *pos = i;
+                return Ok(pop!());
+            }
+            b'U' => {
+                // SHORT_BINSTRING
+                let n = p[i] as usize;
+                i += 1;
+                st.push(V::Str(String::from_utf8_lossy(&p[i..i + n]).into_owned()));
+                i += n;
+            }
+            b'T' => {
+                // BINSTRING
+                let n = u32le(p, i);
+                i += 4;
+                st.push(V::Str(String::from_utf8_lossy(&p[i..i + n]).into_owned()));
+                i += n;
+            }
+            0x8b => {
+                // LONG4 (only small values matter here)
+                let n = u32le(p, i);
+                i += 4 + n;
+                st.push(V::Int(0));
+            }
             b'}' => st.push(V::Dict(vec![])),
             b']' => st.push(V::List(vec![])),
             b')' => st.push(V::Tuple(vec![])),
@@ -373,9 +404,79 @@ fn unpickle(p: &[u8]) -> Result<V, PthError> {
     }
 }
 
+/// Pre-1.6 torch.save format: magic, protocol, sys_info and the object as
+/// consecutive pickles, then the list of storage keys, then each storage's
+/// raw data in that order (u64 element count + data).
+fn load_legacy(bytes: &[u8]) -> Result<StateDict, PthError> {
+    let mut pos = 0usize;
+    let _magic = unpickle_at(bytes, &mut pos)?;
+    let _proto = unpickle_at(bytes, &mut pos)?;
+    let _sys = unpickle_at(bytes, &mut pos)?;
+    let root = unpickle_at(bytes, &mut pos)?;
+    let keys = match unpickle_at(bytes, &mut pos)? {
+        V::List(k) => k.into_iter().filter_map(|v| if let V::Str(s) = v { Some(s) } else { None }).collect::<Vec<_>>(),
+        _ => return err("legacy checkpoint: storage key list missing"),
+    };
+    let mut dict = match root {
+        V::Dict(d) => d,
+        _ => return err("checkpoint root is not a dict"),
+    };
+    for wrapper in ["params_ema", "params", "state_dict", "model"] {
+        if let Some(p) = dict.iter().position(|(k, v)| matches!(k, V::Str(s) if s == wrapper) && matches!(v, V::Dict(_))) {
+            if let (_, V::Dict(inner)) = dict.swap_remove(p) {
+                dict = inner;
+                break;
+            }
+        }
+    }
+    // Element sizes per storage key, from the tensors that use them.
+    let mut esize: HashMap<String, usize> = HashMap::new();
+    for (_, v) in &dict {
+        if let V::Tensor { key, dtype, .. } = v {
+            esize.insert(key.clone(), if dtype == "HalfStorage" { 2 } else { 4 });
+        }
+    }
+    let mut storages: HashMap<String, &[u8]> = HashMap::new();
+    for k in &keys {
+        if pos + 8 > bytes.len() {
+            return err("legacy checkpoint truncated");
+        }
+        let n = u64le(bytes, pos);
+        pos += 8;
+        let len = n * esize.get(k).copied().unwrap_or(4);
+        if pos + len > bytes.len() {
+            return err("legacy checkpoint truncated");
+        }
+        storages.insert(k.clone(), &bytes[pos..pos + len]);
+        pos += len;
+    }
+    let mut out = Vec::new();
+    for (k, v) in dict {
+        let (name, (key, dtype, offset, shape)) = match (k, v) {
+            (V::Str(n), V::Tensor { key, dtype, offset, shape, .. }) => (n, (key, dtype, offset, shape)),
+            _ => continue,
+        };
+        let numel: usize = shape.iter().product();
+        let raw = storages.get(&key).ok_or_else(|| PthError(format!("missing storage {key}")))?;
+        let data: Vec<f32> = match dtype.as_str() {
+            "FloatStorage" => raw[offset * 4..(offset + numel) * 4].chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect(),
+            "HalfStorage" => raw[offset * 2..(offset + numel) * 2].chunks_exact(2).map(|c| crate::half::f16_to_f32(u16::from_le_bytes([c[0], c[1]]))).collect(),
+            _ if name.ends_with("num_batches_tracked") => continue,
+            other => return err(format!("{name}: unsupported dtype {other}")),
+        };
+        // `module.` prefix from DataParallel training.
+        let name = name.strip_prefix("module.").map(String::from).unwrap_or(name);
+        out.push((name, TensorF32 { shape, data }));
+    }
+    Ok(out)
+}
+
 /// Load every tensor of a checkpoint. Real-ESRGAN checkpoints wrap the state
 /// dict as `{"params_ema": ...}` or `{"params": ...}`; `params_ema` wins.
 pub fn load_pth(bytes: &[u8]) -> Result<StateDict, PthError> {
+    if bytes.len() > 2 && bytes[0] == 0x80 && &bytes[..2] != b"PK" {
+        return load_legacy(bytes);
+    }
     let entries = zip_entries(bytes)?;
     let pkl = entries.iter().find(|e| e.name.ends_with("/data.pkl")).ok_or_else(|| PthError("no data.pkl".into()))?;
     let prefix = pkl.name.trim_end_matches("data.pkl").to_string();
@@ -419,6 +520,7 @@ pub fn load_pth(bytes: &[u8]) -> Result<StateDict, PthError> {
         let data: Vec<f32> = match dtype.as_str() {
             "FloatStorage" => raw[offset * 4..(offset + numel) * 4].chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect(),
             "HalfStorage" => raw[offset * 2..(offset + numel) * 2].chunks_exact(2).map(|c| crate::half::f16_to_f32(u16::from_le_bytes([c[0], c[1]]))).collect(),
+            _ if name.ends_with("num_batches_tracked") => continue,
             other => return err(format!("{name}: unsupported dtype {other}")),
         };
         out.push((name, TensorF32 { shape, data }));

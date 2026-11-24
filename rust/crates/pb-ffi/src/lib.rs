@@ -15,6 +15,8 @@ use std::sync::{Arc, Mutex};
 
 pub mod editor;
 pub mod history;
+pub mod cutout;
+pub mod downloads;
 pub mod pixel;
 pub mod server;
 pub mod smart;
@@ -179,7 +181,7 @@ impl CancelToken {
 
 #[derive(uniffi::Object)]
 pub struct PixelBoostCore {
-    models_dir: PathBuf,
+    pub(crate) models_dir: PathBuf,
     /// Loaded networks, keyed by model id (+ denoise level), kept warm
     /// between runs.
     cache: Mutex<HashMap<String, Arc<Engine>>>,
@@ -207,13 +209,14 @@ impl PixelBoostCore {
     /// `models_dir` holds the bundled `.pbnn` files.
     #[uniffi::constructor]
     pub fn new(models_dir: String) -> Arc<Self> {
+        pb_core::engine::set_models_dir(std::path::Path::new(&models_dir));
         Arc::new(PixelBoostCore { models_dir: PathBuf::from(models_dir), cache: Mutex::new(HashMap::new()) })
     }
 
     pub fn models(&self) -> Vec<ModelEntry> {
         models::MODELS
             .iter()
-            .filter(|m| m.id != "fast-denoise")
+            .filter(|m| m.id != "fast-denoise" && pb_core::model_available(&self.models_dir, m.id))
             .map(|m| ModelEntry { id: m.id.into(), name: m.name.into(), best_for: m.best_for.into(), scale: m.scale, cost: m.cost })
             .collect()
     }
@@ -329,7 +332,9 @@ impl PixelBoostCore {
         let img = Image::open(&input_path)?;
         let load_ms = t_load.elapsed().as_secs_f64() * 1000.0;
         let fp = if pb_core::telemetry::enabled() { pb_core::telemetry::fingerprint(&img) } else { String::new() };
-        let model = settings.model.clone();
+        // An optional model that isn't downloaded: the photo network does
+        // the same job (with a resample to the asked size).
+        let model = if pb_core::model_available(&self.models_dir, &settings.model) { settings.model.clone() } else { "photo".to_string() };
         let denoise = if model == "fast" && settings.denoise > 0.0 { Some(settings.denoise) } else { None };
         let realism = if settings.realism > 0.0 { settings.realism.min(1.0) } else { 1.0 };
         let stack = pb_core::fusion::Stack::build(&model, denoise, realism, settings.adaptive, &mut |id, t| {

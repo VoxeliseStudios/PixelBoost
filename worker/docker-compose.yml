@@ -19,9 +19,11 @@ services:
       - RAYON_NUM_THREADS=6
       - MAX_OUTPUT_MP=300
       - RESULT_TTL_HOURS=168
+      - MODELS_EXTRA_DIR=/models-extra
     volumes:
       - /mnt/fastssd/pixelboost-jobs:/jobs
       - ../Models/pbnn:/models:ro
+      - ../Models/downloads:/models-extra:ro
     mem_limit: 3g
     cpus: 6
     healthcheck:

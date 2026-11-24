@@ -27,5 +27,9 @@ pb-gpu = { path = "../pb-gpu", optional = true }
 uniffi = { version = "=0.28.3" }
 serde_json.workspace = true
 thiserror = "2"
+sha2 = "0.10"
 serde.workspace = true
 ureq = { version = "2", default-features = false, features = ["tls", "json"] }
+
+[dev-dependencies]
+pb-core = { path = "../pb-core", default-features = false }

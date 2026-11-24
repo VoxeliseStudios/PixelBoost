@@ -455,7 +455,7 @@ pub fn recommend_fixed(m: &Measures, b: Budget, fx: &Fixed) -> Recommendation {
         "fast"
     } else if portrait {
         "clean"
-    } else if scale <= 2.0 {
+    } else if scale <= 2.0 && crate::engine::usable("native2x") {
         why.push("Clean photo at 2× → Native 2× network".into());
         "native2x"
     } else {

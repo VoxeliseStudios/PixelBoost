@@ -706,6 +706,11 @@ async fn main() {
         eprintln!("warning: WORKER_KEY is empty — anyone who can reach this port can submit jobs");
     }
     load_jobs(&app);
+    // Optional models (native 2x, HQ cutout) live in a second folder.
+    pb_core::engine::set_models_dir(&app.models);
+    if let Ok(extra) = std::env::var("MODELS_EXTRA_DIR") {
+        pb_core::set_extra_model_dirs(vec![PathBuf::from(extra)]);
+    }
     let col = Arc::new(pb_core::telemetry::Collector::default());
     let _ = TELEMETRY.set(col.clone());
     pb_core::telemetry::set_sink(Some(col));

@@ -9,6 +9,7 @@ pub mod arch;
 pub mod conv;
 pub mod fmap;
 pub mod half;
+pub mod seg;
 pub mod telemetry;
 pub mod pbm;
 pub mod pth;
