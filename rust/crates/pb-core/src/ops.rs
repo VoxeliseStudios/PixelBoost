@@ -12,7 +12,7 @@ use crate::text::{self, TextSpec};
 use crate::resample::{resize, Filter};
 use serde::Deserialize;
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, serde::Serialize, Debug, Clone)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Op {
     Adjust(Adjustments),
@@ -272,7 +272,48 @@ fn over(fg: &Image, bg: &Image) -> Image {
     out
 }
 
+/// Short name of an op ("adjust", "pixel_art", ...).
+pub fn op_name(op: &Op) -> String {
+    match serde_json::to_value(op) {
+        Ok(serde_json::Value::Object(m)) => m.get("op").and_then(|v| v.as_str()).unwrap_or("?").to_string(),
+        _ => "?".into(),
+    }
+}
+
+/// Apply one op (with telemetry: op, size, time, memory; live previews
+/// below 2 MP are summarised per op instead of one event each).
 pub fn apply(img: &Image, op: &Op) -> Result<Image, String> {
+    if !crate::telemetry::enabled() {
+        return apply_inner(img, op);
+    }
+    let t0 = std::time::Instant::now();
+    let r = apply_inner(img, op);
+    report(op, img.w * img.h, t0, r.as_ref().map(|_| ()).map_err(|e| e.as_str()));
+    r
+}
+
+/// Editor telemetry for one op (live previews below 2 MP are summarised).
+pub(crate) fn report(op: &Op, px: usize, t0: std::time::Instant, r: Result<(), &str>) {
+    let ms = t0.elapsed().as_secs_f64() * 1000.0;
+    let name = op_name(op);
+    let mp = px as f64 / 1e6;
+    if mp < 2.0 && r.is_ok() {
+        crate::telemetry::sample("editor", "preview", &name, ms);
+    } else {
+        let (now, peak) = crate::telemetry::memory_mb();
+        let mut e = crate::telemetry::event("editor", "op").ms(ms).tag("op", &name).metric("mp", mp).metric("mem_mb", now).metric("mem_peak_mb", peak);
+        // Numeric parameters (slider values people actually use).
+        if let Ok(v) = serde_json::to_value(op) {
+            e = e.json("p", &v);
+        }
+        match r {
+            Ok(_) => e.tag("outcome", "ok").emit(),
+            Err(m) => e.tag("outcome", "error").tag("error", m).emit(),
+        }
+    }
+}
+
+fn apply_inner(img: &Image, op: &Op) -> Result<Image, String> {
     let mut out = img.clone();
     match op {
         Op::Adjust(a) => edit::adjust(&mut out, a),

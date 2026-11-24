@@ -317,3 +317,69 @@ impl ServerClient {
         }
     }
 }
+
+/// Plain helpers for other pb-ffi modules (telemetry, model downloads).
+impl ServerClient {
+    pub(crate) fn device_id(&self) -> String {
+        self.cfg.lock().unwrap().device.clone()
+    }
+
+    pub(crate) fn base_url(&self) -> String {
+        self.cfg.lock().unwrap().base.clone()
+    }
+
+    pub(crate) fn post_json_now(&self, path: &str, body: &Value) -> Result<Value, PbError> {
+        let c = self.cfg.lock().unwrap().clone();
+        if c.base.is_empty() {
+            return Err(err("no server configured"));
+        }
+        auth(self.agent.post(&format!("{}{path}", c.base)), &c.key).send_json(body.clone()).map_err(read_err)?.into_json().map_err(err)
+    }
+
+    pub(crate) fn post_bytes_now(&self, path: &str, query: &[(&str, &str)], content_type: &str, bytes: &[u8]) -> Result<Value, PbError> {
+        let c = self.cfg.lock().unwrap().clone();
+        if c.base.is_empty() {
+            return Err(err("no server configured"));
+        }
+        let mut r = auth(self.agent.post(&format!("{}{path}", c.base)), &c.key).set("Content-Type", content_type);
+        for (k, v) in query {
+            r = r.query(k, v);
+        }
+        r.send_bytes(bytes).map_err(read_err)?.into_json().map_err(err)
+    }
+
+    /// GET a file to `dest` (with Range resume when `dest.part` exists),
+    /// reporting progress; returns the bytes written in total.
+    pub(crate) fn download_to(&self, url: &str, dest: &std::path::Path, progress: &dyn Fn(u64, u64)) -> Result<u64, PbError> {
+        use std::io::{Read, Write};
+        let c = self.cfg.lock().unwrap().clone();
+        let full = if url.starts_with("http") { url.to_string() } else { format!("{}{url}", c.base) };
+        let part = dest.with_extension("part");
+        let have = std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
+        let mut req = auth(self.agent.get(&full), &c.key);
+        if have > 0 {
+            req = req.set("Range", &format!("bytes={have}-"));
+        }
+        let resp = req.call().map_err(read_err)?;
+        let resumed = resp.status() == 206;
+        let len: u64 = resp.header("Content-Length").and_then(|v| v.parse().ok()).unwrap_or(0);
+        let total = if resumed { have + len } else { len };
+        let mut f = std::fs::OpenOptions::new().create(true).write(true).append(resumed).truncate(!resumed).open(&part).map_err(err)?;
+        let mut got = if resumed { have } else { 0 };
+        let mut rd = resp.into_reader();
+        let mut buf = vec![0u8; 1 << 16];
+        loop {
+            let n = rd.read(&mut buf).map_err(err)?;
+            if n == 0 {
+                break;
+            }
+            f.write_all(&buf[..n]).map_err(err)?;
+            got += n as u64;
+            progress(got, total);
+        }
+        f.flush().map_err(err)?;
+        drop(f);
+        std::fs::rename(&part, dest).map_err(err)?;
+        Ok(got)
+    }
+}

@@ -484,8 +484,258 @@ impl Store {
 async fn cleanup_once(db: &PgPool) {
     let a = sqlx::query("DELETE FROM image_imports WHERE expires_at < NOW()").execute(db).await.map(|r| r.rows_affected()).unwrap_or(0);
     let b = sqlx::query("DELETE FROM image_exports WHERE expires_at < NOW()").execute(db).await.map(|r| r.rows_affected()).unwrap_or(0);
-    if a + b > 0 {
-        println!("cleanup: deleted {a} expired imports, {b} expired exports");
+    let c = sqlx::query("DELETE FROM telemetry_samples WHERE expires_at < NOW()").execute(db).await.map(|r| r.rows_affected()).unwrap_or(0);
+    let d = sqlx::query("DELETE FROM telemetry_events WHERE ts < NOW() - INTERVAL '180 days'").execute(db).await.map(|r| r.rows_affected()).unwrap_or(0);
+    if a + b + c + d > 0 {
+        println!("cleanup: deleted {a} expired imports, {b} expired exports, {c} samples, {d} old telemetry events");
+    }
+}
+
+// ---------------------------------------------------------------- telemetry (5.7)
+
+const TM_MAX_EVENTS: usize = 2000;
+
+/// Batch upload: {device_id, session_id?, app_version?, os_version?,
+/// device_model?, source?, events: [{ts, system, name, run?, ms?, metrics?, tags?}]}.
+async fn log_telemetry(State(app): State<App>, Json(body): Json<Value>) -> R {
+    require(&body, &[("device_id", Ty::Str), ("events", Ty::Arr)])?;
+    let n = body["events"].as_array().map(|a| a.len()).unwrap_or(0);
+    if n > TM_MAX_EVENTS {
+        return Err(err(StatusCode::PAYLOAD_TOO_LARGE, format!("At most {TM_MAX_EVENTS} events per batch")));
+    }
+    if n == 0 {
+        return Ok(Json(json!({"inserted": 0})));
+    }
+    let s = |k: &str| body.get(k).and_then(|v| v.as_str()).map(|v| v.chars().take(64).collect::<String>());
+    let n = insert_events(&app.db, s("device_id"), s("session_id"), s("app_version"), s("os_version"), s("device_model"), s("source").unwrap_or_else(|| "app".into()), &body["events"]).await?;
+    Ok(Json(json!({"inserted": n})))
+}
+
+/// Insert an event array; an event's `tags.device` (worker events carry the
+/// device that sent the job) overrides `device`.
+#[allow(clippy::too_many_arguments)]
+async fn insert_events(db: &PgPool, device: Option<String>, session: Option<String>, app_version: Option<String>, os: Option<String>, model: Option<String>, source: String, events: &Value) -> Result<u64, ApiError> {
+    let r = sqlx::query(
+        "INSERT INTO telemetry_events (device_id, session_id, run_id, ts, system, name, duration_ms, metrics, tags, app_version, os_version, device_model, source)
+         SELECT left(COALESCE(NULLIF(e->'tags'->>'device', ''), $1), 64), $2, NULLIF(left(e->>'run', 36), ''),
+                CASE WHEN jsonb_typeof(e->'ts') = 'number' AND (e->>'ts')::float8 BETWEEN 1.5e9 AND 4e9
+                     THEN to_timestamp((e->>'ts')::float8) AT TIME ZONE 'UTC' ELSE LOCALTIMESTAMP END,
+                left(COALESCE(e->>'system', '?'), 40), left(COALESCE(e->>'name', '?'), 60),
+                CASE WHEN jsonb_typeof(e->'ms') = 'number' THEN (e->>'ms')::real END,
+                CASE WHEN jsonb_typeof(e->'metrics') = 'object' THEN e->'metrics' ELSE '{}'::jsonb END,
+                CASE WHEN jsonb_typeof(e->'tags') = 'object' THEN e->'tags' ELSE '{}'::jsonb END,
+                left($3, 20), left($4, 20), left($5, 50), left($6, 20)
+         FROM jsonb_array_elements($7::jsonb) e
+         WHERE jsonb_typeof(e) = 'object'",
+    )
+    .bind(device.unwrap_or_else(|| "unknown".into()))
+    .bind(session)
+    .bind(app_version)
+    .bind(os)
+    .bind(model)
+    .bind(source)
+    .bind(events)
+    .execute(db)
+    .await?;
+    Ok(r.rows_affected())
+}
+
+/// Every minute: pull the cloud worker's telemetry into the database.
+async fn pull_worker_telemetry(app: App) {
+    if app.jobs_upstream.is_empty() {
+        return;
+    }
+    loop {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        loop {
+            let url = format!("{}/telemetry/drain", app.jobs_upstream.trim_end_matches('/'));
+            let resp = app.http.get(&url).header("X-Worker-Key", app.worker_key.as_str()).timeout(Duration::from_secs(20)).send().await;
+            let Ok(resp) = resp else { break };
+            if !resp.status().is_success() {
+                break;
+            }
+            let Ok(bytes) = resp.bytes().await else { break };
+            let Ok(v) = serde_json::from_slice::<Value>(&bytes) else { break };
+            let n = v["events"].as_array().map(|a| a.len()).unwrap_or(0);
+            if n > 0 {
+                if let Err(e) = insert_events(&app.db, Some("worker".into()), None, Some(format!("worker {VERSION}")), None, Some("pixelboost-worker".into()), "worker".into(), &v["events"]).await {
+                    eprintln!("worker telemetry: insert failed: {:?}", e.1);
+                    break;
+                }
+            }
+            if v["remaining"].as_u64().unwrap_or(0) == 0 {
+                break;
+            }
+        }
+    }
+}
+
+fn opt(q: &HashMap<String, String>, k: &str) -> Option<String> {
+    q.get(k).filter(|v| !v.is_empty()).cloned()
+}
+
+/// Raw events for analysis tools (`pixelboost telemetry pull`).
+async fn get_telemetry(State(app): State<App>, Query(q): Query<HashMap<String, String>>) -> R {
+    let limit: i64 = q.get("limit").and_then(|v| v.parse().ok()).unwrap_or(1000).clamp(1, 20000);
+    let hours: f64 = q.get("hours").and_then(|v| v.parse().ok()).unwrap_or(24.0 * 30.0);
+    let after: i64 = q.get("after_id").and_then(|v| v.parse().ok()).unwrap_or(0);
+    let v: Value = sqlx::query_scalar(&rows_sql(
+        "SELECT id, device_id, session_id, run_id, ts, system, name, duration_ms AS ms, metrics, tags, app_version, os_version, device_model, source
+         FROM telemetry_events
+         WHERE ts > LOCALTIMESTAMP - make_interval(secs => $1) AND id > $2
+           AND ($3::text IS NULL OR system = $3) AND ($4::text IS NULL OR name = $4)
+           AND ($5::text IS NULL OR run_id = $5) AND ($6::text IS NULL OR device_id = $6)
+         ORDER BY id LIMIT $7",
+    ))
+    .bind(hours * 3600.0)
+    .bind(after)
+    .bind(opt(&q, "system"))
+    .bind(opt(&q, "name"))
+    .bind(opt(&q, "run"))
+    .bind(opt(&q, "device_id"))
+    .bind(limit)
+    .fetch_one(&app.db)
+    .await?;
+    Ok(Json(json!({"events": v})))
+}
+
+/// Distributions per event and metric (n, mean, p10 / p50 / p90), duration
+/// percentiles and the most common tag values, over the last `days`.
+async fn telemetry_summary(State(app): State<App>, Query(q): Query<HashMap<String, String>>) -> R {
+    let days: f64 = q.get("days").and_then(|v| v.parse().ok()).unwrap_or(30.0);
+    let (sys, name) = (opt(&q, "system"), opt(&q, "name"));
+    let secs = days * 86400.0;
+    let events: Value = sqlx::query_scalar(&rows_sql(
+        "SELECT system, name, count(*) AS n, count(DISTINCT device_id) AS devices,
+                percentile_cont(0.5) WITHIN GROUP (ORDER BY duration_ms) AS ms_p50,
+                percentile_cont(0.9) WITHIN GROUP (ORDER BY duration_ms) AS ms_p90
+         FROM telemetry_events
+         WHERE ts > LOCALTIMESTAMP - make_interval(secs => $1) AND ($2::text IS NULL OR system = $2) AND ($3::text IS NULL OR name = $3)
+         GROUP BY system, name ORDER BY system, name",
+    ))
+    .bind(secs)
+    .bind(&sys)
+    .bind(&name)
+    .fetch_one(&app.db)
+    .await?;
+    let metrics: Value = sqlx::query_scalar(&rows_sql(
+        "SELECT system, name, key, count(*) AS n, avg(v) AS mean,
+                percentile_cont(0.1) WITHIN GROUP (ORDER BY v) AS p10,
+                percentile_cont(0.5) WITHIN GROUP (ORDER BY v) AS p50,
+                percentile_cont(0.9) WITHIN GROUP (ORDER BY v) AS p90
+         FROM (SELECT system, name, m.key, (m.value)::text::float8 AS v
+               FROM telemetry_events, jsonb_each(metrics) m
+               WHERE ts > LOCALTIMESTAMP - make_interval(secs => $1) AND ($2::text IS NULL OR system = $2) AND ($3::text IS NULL OR name = $3)
+                 AND jsonb_typeof(m.value) = 'number') x
+         GROUP BY system, name, key ORDER BY system, name, key",
+    ))
+    .bind(secs)
+    .bind(&sys)
+    .bind(&name)
+    .fetch_one(&app.db)
+    .await?;
+    let tags: Value = sqlx::query_scalar(&rows_sql(
+        "SELECT system, name, key, value, n FROM (
+            SELECT system, name, t.key, t.value, count(*) AS n,
+                   row_number() OVER (PARTITION BY system, name, t.key ORDER BY count(*) DESC) AS r
+            FROM telemetry_events, jsonb_each_text(tags) t
+            WHERE ts > LOCALTIMESTAMP - make_interval(secs => $1) AND ($2::text IS NULL OR system = $2) AND ($3::text IS NULL OR name = $3)
+            GROUP BY system, name, t.key, t.value) x
+         WHERE r <= 12 ORDER BY system, name, key, n DESC",
+    ))
+    .bind(secs)
+    .bind(&sys)
+    .bind(&name)
+    .fetch_one(&app.db)
+    .await?;
+    Ok(Json(json!({"days": days, "events": events, "metrics": metrics, "tags": tags})))
+}
+
+/// Feedback joined to the runs it judges, grouped by one tag of the run
+/// (`by`, e.g. model / backend / auto / op / style): how often results were
+/// kept, discarded, re-run or rated, per group.
+async fn telemetry_feedback(State(app): State<App>, Query(q): Query<HashMap<String, String>>) -> R {
+    let days: f64 = q.get("days").and_then(|v| v.parse().ok()).unwrap_or(90.0);
+    let sys = opt(&q, "system").unwrap_or_else(|| "upscale".into());
+    let name = opt(&q, "name").unwrap_or_else(|| "run".into());
+    let by = opt(&q, "by").unwrap_or_else(|| "model".into());
+    let v: Value = sqlx::query_scalar(&rows_sql(
+        "SELECT r.tags->>$4 AS grp, f.name AS feedback, count(*) AS n, count(DISTINCT r.run_id) AS runs,
+                avg((f.metrics->>'value')::float8) AS mean_value
+         FROM telemetry_events f
+         JOIN telemetry_events r ON r.run_id = f.run_id AND r.system = $2 AND r.name = $3
+         WHERE f.system = 'feedback' AND f.ts > LOCALTIMESTAMP - make_interval(secs => $1)
+         GROUP BY 1, 2 ORDER BY 1, 2",
+    ))
+    .bind(days * 86400.0)
+    .bind(&sys)
+    .bind(&name)
+    .bind(&by)
+    .fetch_one(&app.db)
+    .await?;
+    Ok(Json(json!({"system": sys, "name": name, "by": by, "groups": v})))
+}
+
+/// Opt-in example upload: body = [u32 LE len][source jpeg][result jpeg].
+async fn post_sample(State(app): State<App>, Query(q): Query<HashMap<String, String>>, body: Bytes) -> R {
+    let dev = device_param(&q)?;
+    if body.len() < 8 || body.len() > 8 * 1024 * 1024 {
+        return Err(err(StatusCode::UNPROCESSABLE_ENTITY, "sample must be 8 B .. 8 MB"));
+    }
+    let n = u32::from_le_bytes([body[0], body[1], body[2], body[3]]) as usize;
+    if n == 0 || 4 + n >= body.len() {
+        return Err(err(StatusCode::UNPROCESSABLE_ENTITY, "bad sample layout"));
+    }
+    let (src, res) = (&body[4..4 + n], &body[4 + n..]);
+    let jpeg = |b: &[u8]| b.len() > 3 && b[0] == 0xFF && b[1] == 0xD8;
+    if !jpeg(src) || !jpeg(res) {
+        return Err(err(StatusCode::UNPROCESSABLE_ENTITY, "sample images must be JPEG"));
+    }
+    let id = new_id();
+    let cut = |k: &str, n: usize| opt(&q, k).map(|v| v.chars().take(n).collect::<String>());
+    sqlx::query(
+        "INSERT INTO telemetry_samples (id, device_id, run_id, reason, note, app_version, device_model, expires_at, source_jpeg, result_jpeg)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, LOCALTIMESTAMP + INTERVAL '30 days', $8, $9)",
+    )
+    .bind(&id)
+    .bind(&dev)
+    .bind(cut("run", 36))
+    .bind(cut("reason", 40))
+    .bind(cut("note", 500))
+    .bind(cut("app_version", 20))
+    .bind(cut("device_model", 50))
+    .bind(src)
+    .bind(res)
+    .execute(&app.db)
+    .await?;
+    Ok(Json(json!({"id": id})))
+}
+
+async fn list_samples(State(app): State<App>, Query(q): Query<HashMap<String, String>>) -> R {
+    let (limit, offset) = limit_offset(&q)?;
+    let v: Value = sqlx::query_scalar(&rows_sql(
+        "SELECT id, device_id, run_id, reason, note, app_version, device_model, created_at, expires_at,
+                octet_length(source_jpeg) AS source_bytes, octet_length(result_jpeg) AS result_bytes
+         FROM telemetry_samples WHERE ($1::text IS NULL OR reason = $1) ORDER BY created_at DESC LIMIT $2 OFFSET $3",
+    ))
+    .bind(opt(&q, "reason"))
+    .bind(limit)
+    .bind(offset)
+    .fetch_one(&app.db)
+    .await?;
+    Ok(Json(json!({"samples": v})))
+}
+
+async fn get_sample_image(State(app): State<App>, Path((id, which)): Path<(String, String)>) -> Result<Response, ApiError> {
+    let col = match which.as_str() {
+        "source" => "source_jpeg",
+        "result" => "result_jpeg",
+        _ => return Err(err(StatusCode::NOT_FOUND, "source or result")),
+    };
+    let b: Option<Vec<u8>> = sqlx::query_scalar(&format!("SELECT {col} FROM telemetry_samples WHERE id = $1")).bind(&id).fetch_optional(&app.db).await?;
+    match b {
+        Some(b) => Ok(([(header::CONTENT_TYPE, "image/jpeg")], b).into_response()),
+        None => Err(err(StatusCode::NOT_FOUND, "Sample not found")),
     }
 }
 
@@ -709,6 +959,8 @@ async fn main() {
         }
     });
 
+    tokio::spawn(pull_worker_telemetry(app.clone()));
+
     let router = Router::new()
         .route("/health", get(health))
         .route("/log/upscale", post(log_upscale))
@@ -724,6 +976,12 @@ async fn main() {
         .route("/log/comparison/{cid}/pick", post(log_comparison_pick))
         .route("/log/comparisons", get(get_comparisons))
         .route("/log/overview", get(get_overview))
+        .route("/log/telemetry", post(log_telemetry).get(get_telemetry))
+        .route("/log/telemetry/summary", get(telemetry_summary))
+        .route("/log/telemetry/feedback", get(telemetry_feedback))
+        .route("/log/telemetry/sample", post(post_sample))
+        .route("/log/telemetry/samples", get(list_samples))
+        .route("/log/telemetry/sample/{id}/{which}", get(get_sample_image))
         .route(
             "/import",
             post(|State(a): State<App>, mp: Multipart| create_stored(a, Store::Imports, mp))

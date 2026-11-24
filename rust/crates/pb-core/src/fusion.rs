@@ -27,6 +27,10 @@ pub trait Upscaler: Sync {
     fn label(&self) -> String;
     /// Network MACs per input pixel (all networks involved).
     fn macs_per_px(&self) -> f64;
+    /// The networks run on the GPU (the CPU is free for post-processing).
+    fn on_gpu(&self) -> bool {
+        false
+    }
 }
 
 impl Upscaler for Engine {
@@ -41,6 +45,9 @@ impl Upscaler for Engine {
     }
     fn macs_per_px(&self) -> f64 {
         Engine::macs_per_px(self)
+    }
+    fn on_gpu(&self) -> bool {
+        Engine::on_gpu(self)
     }
 }
 
@@ -74,6 +81,9 @@ impl<T: Upscaler + Send> Upscaler for Arc<T> {
     }
     fn macs_per_px(&self) -> f64 {
         (**self).macs_per_px()
+    }
+    fn on_gpu(&self) -> bool {
+        (**self).on_gpu()
     }
 }
 
@@ -138,6 +148,12 @@ impl Upscaler for Stack {
             Stack::Fused(f) => Upscaler::macs_per_px(f),
         }
     }
+    fn on_gpu(&self) -> bool {
+        match self {
+            Stack::One(e) => e.on_gpu(),
+            Stack::Fused(f) => f.detail.on_gpu(),
+        }
+    }
 }
 
 /// Skin likelihood of one pixel (soft YCbCr box, 0..1).
@@ -179,6 +195,10 @@ impl Upscaler for Fusion {
 
     fn macs_per_px(&self) -> f64 {
         self.detail.macs_per_px() + self.faithful.macs_per_px()
+    }
+
+    fn on_gpu(&self) -> bool {
+        self.detail.on_gpu()
     }
 
     fn forward(&self, region: &Image) -> Image {

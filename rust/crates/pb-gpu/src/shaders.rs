@@ -24,6 +24,29 @@ pub struct ConvCfg {
     /// Input channels load as vec4 (cin, channel stride and offset all
     /// multiples of 4).
     pub vec: bool,
+    /// Feature maps and weights stored as f16 (`shader-f16`); arithmetic
+    /// and workgroup tiles stay f32.
+    pub half: bool,
+}
+
+static HALF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Storage precision of every buffer (set once when the GPU is created).
+pub fn set_half(on: bool) {
+    HALF.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn half() -> bool {
+    HALF.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Bytes per stored element.
+pub fn elem_bytes() -> usize {
+    if half() {
+        2
+    } else {
+        4
+    }
 }
 
 impl ConvCfg {
@@ -46,7 +69,7 @@ impl ConvCfg {
             16
         };
         let t = tiles()[slot(bn)];
-        ConvCfg { bm: t.bm, bn: bn as u32, bk: t.bk, tm: t.tm, tn: t.tn, up, vec }
+        ConvCfg { bm: t.bm, bn: bn as u32, bk: t.bk, tm: t.tm, tn: t.tn, up, vec, half: half() }
     }
 }
 
@@ -127,12 +150,13 @@ struct P {
   blocks_x: u32, r: u32, p2: u32, p3: u32,
   p4: u32, p5: u32, p6: u32, p7: u32,
 }
-@group(0) @binding(0) var<storage, read> wts: array<vec4<f32>>;
+@group(0) @binding(0) var<storage, read> wts: array<vec4<$T$>>;
 $SRCDECL
-@group(0) @binding(2) var<storage, read_write> dst: array<f32>;
-@group(0) @binding(3) var<storage, read_write> r1: array<f32>;
-@group(0) @binding(4) var<storage, read_write> r2: array<f32>;
+@group(0) @binding(2) var<storage, read_write> dst: array<$T$>;
+@group(0) @binding(3) var<storage, read_write> r1: array<$T$>;
+@group(0) @binding(4) var<storage, read_write> r2: array<$T$>;
 @group(0) @binding(5) var<uniform> p: P;
+fn h4(q: vec4<$T$>) -> vec4<f32> { return vec4<f32>(f32(q.x), f32(q.y), f32(q.z), f32(q.w)); }
 "#;
 
 /// SRVGGNetCompact tail: pixel shuffle of the last conv's output plus the
@@ -153,7 +177,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let sub = (Y % r) * r + X % r;
   let o = ((Y + 1u) * (W + 2u) + X + 1u) * 3u;
   for (var ch = 0u; ch < 3u; ch++) {
-    dst[o + ch] = src[lp * p.in_c + ch * r * r + sub] + r1[lp * 3u + ch];
+    dst[o + ch] = $T$(f32(src[lp * p.in_c + ch * r * r + sub]) + f32(r1[lp * 3u + ch]));
   }
 }
 "#;
@@ -174,10 +198,13 @@ pub fn conv_source(c: ConvCfg) -> String {
     let (bm, bn, bk) = (c.bm, c.bn, c.bk);
     let mut o = String::new();
     let (decl, load) = if c.vec {
-        ("@group(0) @binding(1) var<storage, read_write> src4: array<vec4<f32>>;", "src4[(I) / 4u]")
+        ("@group(0) @binding(1) var<storage, read_write> src4: array<vec4<$T$>>;", "h4(src4[(I) / 4u])")
     } else {
-        ("@group(0) @binding(1) var<storage, read_write> src: array<f32>;", "vec4<f32>(src[I], 0.0, 0.0, 0.0)")
+        ("@group(0) @binding(1) var<storage, read_write> src: array<$T$>;", "vec4<f32>(f32(src[I]), 0.0, 0.0, 0.0)")
     };
+    if c.half {
+        o.push_str("enable f16;\n");
+    }
     o.push_str(&PARAMS.replace("$SRCDECL", decl));
     // Scalar array: threads writing different lanes of one shared vec4 race
     // on Apple GPUs (lane stores compile to read-modify-write of the vector).
@@ -224,7 +251,7 @@ pub fn conv_source(c: ConvCfg) -> String {
     }
     let _ = writeln!(o, "      for (var e = tid; e < {}u; e += {nt}u) {{", bk * bn / 4);
     let _ = writeln!(o, "        let nq = e % {}u;\n        let k = e / {}u;", bn / 4, bn / 4);
-    o.push_str("        var v = vec4<f32>(0.0);\n        if (c0 + k < p.cin) { v = wts[(p.wofs + (tap * p.cin + c0 + k) * p.cout_pad + n0) / 4u + nq]; }\n        Bs[e] = v;\n      }\n");
+    o.push_str("        var v = vec4<f32>(0.0);\n        if (c0 + k < p.cin) { v = h4(wts[(p.wofs + (tap * p.cin + c0 + k) * p.cout_pad + n0) / 4u + nq]); }\n        Bs[e] = v;\n      }\n");
     o.push_str("      workgroupBarrier();\n");
     let _ = writeln!(o, "      let abase = tm * {}u;\n      let bbase = tn * {tn4}u;", c.tm);
     for k in 0..bk {
@@ -254,7 +281,7 @@ pub fn conv_source(c: ConvCfg) -> String {
     }
     o.push_str("}\n");
     o.push_str(EPI);
-    o
+    o.replace("$T$", if c.half { "f16" } else { "f32" })
 }
 
 /// Bias, activation, scale, residuals and store for four channels.
@@ -266,25 +293,26 @@ fn epi(pix: u32, n: u32, a: vec4<f32>) {
       return;
     }
     let bi = p.bofs + ch;
-    var v = a[j] + wts[bi / 4u][bi % 4u];
+    var v = a[j] + f32(wts[bi / 4u][bi % 4u]);
     if (p.act == 1u) {
       if (v < 0.0) { v = v * p.slope; }
     } else if (p.act == 2u) {
       let ai = p.aofs + ch;
-      if (v < 0.0) { v = v * wts[ai / 4u][ai % 4u]; }
+      if (v < 0.0) { v = v * f32(wts[ai / 4u][ai % 4u]); }
     }
     v = v * p.scale;
     if (p.r1_on != 0u) {
-      v = v + p.r1_coef * r1[pix * p.r1_c + p.r1_off + ch];
+      v = v + p.r1_coef * f32(r1[pix * p.r1_c + p.r1_off + ch]);
     }
     if (p.r2_on != 0u) {
-      v = v + p.r2_coef * r2[pix * p.r2_c + p.r2_off + ch];
+      v = v + p.r2_coef * f32(r2[pix * p.r2_c + p.r2_off + ch]);
     }
-    dst[pix * p.out_c + p.cout_off + ch] = v;
+    dst[pix * p.out_c + p.cout_off + ch] = $T$(v);
   }
 }
 "#;
 
 pub fn tail_source() -> String {
-    format!("{}{TAIL}", PARAMS.replace("$SRCDECL", "@group(0) @binding(1) var<storage, read_write> src: array<f32>;"))
+    let s = format!("{}{}{TAIL}", if half() { "enable f16;\n" } else { "" }, PARAMS.replace("$SRCDECL", "@group(0) @binding(1) var<storage, read_write> src: array<$T$>;"));
+    s.replace("$T$", if half() { "f16" } else { "f32" })
 }

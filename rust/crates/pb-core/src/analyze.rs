@@ -597,7 +597,48 @@ pub fn recommend_fixed(m: &Measures, b: Budget, fx: &Fixed) -> Recommendation {
         ""
     };
     let summary = format!("{what} · {}× · {name}{extra}", scale as u32);
-    Recommendation { model: model.into(), scale, fidelity: fidelity.into(), detail, denoise, ensemble, realism, adaptive, prescale, est_seconds, reasons: why, summary }
+    let r = Recommendation { model: model.into(), scale, fidelity: fidelity.into(), detail, denoise, ensemble, realism, adaptive, prescale, est_seconds, reasons: why, summary };
+    report(m, b, fx, &r);
+    r
+}
+
+/// Telemetry: every measurement next to every decision, the budget and
+/// which fields the user had fixed — what the analyzer thresholds get
+/// re-fitted from (together with later Auto overrides and ratings).
+fn report(m: &Measures, b: Budget, fx: &Fixed, r: &Recommendation) {
+    let e = crate::telemetry::event("analyze", "recommend");
+    if !e.active() {
+        return;
+    }
+    let fixed: Vec<&str> = [
+        ("model", fx.model.is_some()),
+        ("scale", fx.scale.is_some()),
+        ("fidelity", fx.fidelity.is_some()),
+        ("detail", fx.detail.is_some()),
+        ("ensemble", fx.ensemble.is_some()),
+        ("denoise", fx.denoise.is_some()),
+        ("realism", fx.realism.is_some()),
+        ("adaptive", fx.adaptive.is_some()),
+        ("prescale", fx.prescale.is_some()),
+    ]
+    .iter()
+    .filter(|f| f.1)
+    .map(|f| f.0)
+    .collect();
+    let mut rv = serde_json::to_value(r).unwrap_or_default();
+    if let Some(o) = rv.as_object_mut() {
+        o.remove("reasons");
+        o.remove("summary");
+    }
+    e.json("m", &serde_json::to_value(m).unwrap_or_default())
+        .json("rec", &rv)
+        .metric("budget.gflops", b.gflops)
+        .metric("budget.seconds", b.max_seconds)
+        .metric("budget.max_mp", b.max_output_mp)
+        .flag("budget.cloud", b.cloud)
+        .metric("fixed.n", fixed.len() as f64)
+        .tag("fixed", fixed.join(","))
+        .emit();
 }
 
 fn fmt_secs(s: f32) -> String {

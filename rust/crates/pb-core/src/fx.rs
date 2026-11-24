@@ -67,15 +67,23 @@ pub fn zoom_blur(img: &Image, cx: f32, cy: f32, amount: f32) -> Image {
     let (w, h) = (img.w as f32, img.h as f32);
     let (cxp, cyp) = (cx * w, cy * h);
     let k = amount.clamp(0.0, 1.0) * 0.35;
-    let n = 28;
+    let mips = Mips::new(img);
     let mut out = img.clone();
     out.px.par_chunks_mut(img.w).enumerate().for_each(|(y, row)| {
         for (x, p) in row.iter_mut().enumerate() {
             let (dx, dy) = (cxp - x as f32, cyp - y as f32);
+            // Samples follow the streak length: short near the centre, and
+            // long streaks read a pre-filtered level instead of ghosting.
+            let len = k * (dx * dx + dy * dy).sqrt();
+            let (n, lvl) = streak_samples(len, 28);
+            if n <= 1 {
+                *p = img.px[y * img.w + x];
+                continue;
+            }
             let mut acc = [0.0f32; 4];
             for j in 0..n {
                 let t = k * j as f32 / (n - 1) as f32;
-                let s = sample_bilinear(img, x as f32 + dx * t, y as f32 + dy * t);
+                let s = mips.sample(lvl, x as f32 + dx * t, y as f32 + dy * t);
                 for c in 0..4 {
                     acc[c] += s[c];
                 }
@@ -91,16 +99,22 @@ pub fn spin_blur(img: &Image, cx: f32, cy: f32, degrees: f32) -> Image {
     let (w, h) = (img.w as f32, img.h as f32);
     let (cxp, cyp) = (cx * w, cy * h);
     let span = degrees.to_radians();
-    let n = 32;
+    let mips = Mips::new(img);
     let mut out = img.clone();
     out.px.par_chunks_mut(img.w).enumerate().for_each(|(y, row)| {
         for (x, p) in row.iter_mut().enumerate() {
             let (dx, dy) = (x as f32 - cxp, y as f32 - cyp);
+            let len = span.abs() * (dx * dx + dy * dy).sqrt();
+            let (n, lvl) = streak_samples(len, 32);
+            if n <= 1 {
+                *p = img.px[y * img.w + x];
+                continue;
+            }
             let mut acc = [0.0f32; 4];
             for j in 0..n {
                 let a = span * (j as f32 / (n - 1) as f32 - 0.5);
                 let (s, c) = a.sin_cos();
-                let q = sample_bilinear(img, cxp + dx * c - dy * s, cyp + dx * s + dy * c);
+                let q = mips.sample(lvl, cxp + dx * c - dy * s, cyp + dx * s + dy * c);
                 for k in 0..4 {
                     acc[k] += q[k];
                 }
@@ -109,6 +123,58 @@ pub fn spin_blur(img: &Image, cx: f32, cy: f32, degrees: f32) -> Image {
         }
     });
     out
+}
+
+/// Sample count and mip level for a streak of `len` pixels: about one
+/// sample per 1.25 px up to `max`; beyond that the spacing grows and the
+/// samples come from a 2x / 4x / 8x smaller copy so they still overlap.
+fn streak_samples(len: f32, max: usize) -> (usize, usize) {
+    if len < 0.75 {
+        return (1, 0);
+    }
+    let n = ((len / 1.25).ceil() as usize + 1).clamp(2, max);
+    let spacing = len / (n - 1) as f32;
+    let lvl = if spacing <= 2.0 { 0 } else { ((spacing / 2.0).log2().floor() as usize + 1).min(3) };
+    (n, lvl)
+}
+
+/// Box-filtered 2x reductions for pre-filtered sampling.
+struct Mips<'a> {
+    base: &'a Image,
+    levels: Vec<Image>,
+}
+
+impl<'a> Mips<'a> {
+    fn new(img: &'a Image) -> Self {
+        let mut levels: Vec<Image> = Vec::new();
+        for _ in 0..3 {
+            let src = levels.last().unwrap_or(img);
+            if src.w < 4 || src.h < 4 {
+                break;
+            }
+            let (w, h) = (src.w / 2, src.h / 2);
+            let mut d = Image::new(w, h);
+            d.px.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+                for (x, o) in row.iter_mut().enumerate() {
+                    let i = 2 * y * src.w + 2 * x;
+                    let (a, b, c, e) = (src.px[i], src.px[i + 1], src.px[i + src.w], src.px[i + src.w + 1]);
+                    *o = [0, 1, 2, 3].map(|k| (a[k] + b[k] + c[k] + e[k]) * 0.25);
+                }
+            });
+            levels.push(d);
+        }
+        Mips { base: img, levels }
+    }
+
+    #[inline]
+    fn sample(&self, lvl: usize, x: f32, y: f32) -> [f32; 4] {
+        if lvl == 0 || self.levels.is_empty() {
+            return sample_bilinear(self.base, x, y);
+        }
+        let l = lvl.min(self.levels.len());
+        let f = (1u32 << l) as f32;
+        sample_bilinear(&self.levels[l - 1], (x + 0.5) / f - 0.5, (y + 0.5) / f - 0.5)
+    }
 }
 
 /// Linear motion blur: `distance` (fraction of the width) along `angle`.

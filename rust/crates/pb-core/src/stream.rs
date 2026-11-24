@@ -169,6 +169,82 @@ struct PassOut<'a> {
     view_scale: f32,
 }
 
+/// Timing of one streamed run (all passes).
+#[derive(Default)]
+struct Timing {
+    net: crate::telemetry::Stats,
+    post_ms: f64,
+    stall_ms: f64,
+    overlapped: bool,
+}
+
+/// One tile after the network: the source region with its margin and the
+/// network output for it.
+struct NetTile {
+    tx: usize,
+    ty: usize,
+    iw: usize,
+    ih: usize,
+    rx: usize,
+    ry: usize,
+    reg: Image,
+    up: Image,
+}
+
+fn tile_grid(w: usize, h: usize, tile: usize) -> Vec<(usize, usize)> {
+    let mut v = Vec::new();
+    for ty in (0..h).step_by(tile) {
+        for tx in (0..w).step_by(tile) {
+            v.push((tx, ty));
+        }
+    }
+    v
+}
+
+/// The network part of a tile (with self-ensemble).
+fn net_tile(engine: &dyn Upscaler, src: &dyn Source, st: &Settings, tile: usize, tx: usize, ty: usize) -> NetTile {
+    let (w, h) = src.size();
+    let n_ens = match st.ensemble {
+        0 | 1 => 1,
+        2 => 2,
+        3 | 4 => 4,
+        _ => 8,
+    };
+    let order = [0usize, 1, 4, 6, 2, 3, 5, 7];
+    let (iw, ih) = (tile.min(w - tx), tile.min(h - ty));
+    let rx = tx.saturating_sub(MARGIN);
+    let ry = ty.saturating_sub(MARGIN);
+    let rw = (tx + iw + MARGIN).min(w) - rx;
+    let rh = (ty + ih + MARGIN).min(h) - ry;
+    let reg = src.region(rx, ry, rw, rh);
+    // Network, averaged over flipped / rotated copies.
+    let mut up: Option<Image> = None;
+    for &k in order.iter().take(n_ens) {
+        let o = engine.forward(&reg.dihedral(k)).dihedral_inverse(k);
+        up = Some(match up {
+            None => o,
+            Some(mut a) => {
+                a.px.par_iter_mut().zip(o.px.par_iter()).for_each(|(a, b)| {
+                    for c in 0..3 {
+                        a[c] += b[c];
+                    }
+                });
+                a
+            }
+        });
+    }
+    let mut up = up.unwrap();
+    if n_ens > 1 {
+        let inv = 1.0 / n_ens as f32;
+        up.px.par_iter_mut().for_each(|a| {
+            for c in 0..3 {
+                a[c] *= inv;
+            }
+        });
+    }
+    NetTile { tx, ty, iw, ih, rx, ry, reg, up }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_pass(
     engine: &dyn Upscaler,
@@ -178,147 +254,170 @@ fn run_pass(
     done: &mut usize,
     total: usize,
     se: &mut Option<(f64, usize)>,
+    tm: &mut Timing,
     progress: &mut dyn FnMut(StreamEvent<'_>) -> bool,
 ) -> bool {
-    let s = engine.scale();
     let (w, h) = src.size();
-    let out = dst.out;
-    let (ow, oh) = (out.w, out.h);
-    let (mw, mh) = (w * s, h * s);
-    let exact = ow == mw && oh == mh;
-    let filter = if ow < mw { Filter::Lanczos3 } else { Filter::CatmullRom };
     let tile = st.tile.clamp(32, 512);
-    let n_ens = match st.ensemble {
-        0 | 1 => 1,
-        2 => 2,
-        3 | 4 => 4,
-        _ => 8,
+    let grid = tile_grid(w, h, tile);
+    let out = dst.out;
+    let vs = dst.view_scale;
+    let s = engine.scale();
+    let (mw, mh) = (w * s, h * s);
+    let mut post = |t: NetTile, tm: &mut Timing| -> bool {
+        let t0 = Instant::now();
+        let r = post_tile(s, st, t, out, se, mw, mh);
+        tm.post_ms += t0.elapsed().as_secs_f64() * 1000.0;
+        let (ox, oy, rw_o, rh_o) = r;
+        *done += 1;
+        let tile_px = out.crop(ox, oy, rw_o, rh_o);
+        let rect = [(ox as f32 * vs) as usize, (oy as f32 * vs) as usize, (rw_o as f32 * vs).ceil() as usize, (rh_o as f32 * vs).ceil() as usize];
+        progress(StreamEvent { done: *done, total, rect, pixels: &tile_px })
     };
-    let order = [0usize, 1, 4, 6, 2, 3, 5, 7];
-    let fid = st.fidelity.params();
-    for ty in (0..h).step_by(tile) {
-        for tx in (0..w).step_by(tile) {
-            let (iw, ih) = (tile.min(w - tx), tile.min(h - ty));
-            let rx = tx.saturating_sub(MARGIN);
-            let ry = ty.saturating_sub(MARGIN);
-            let rw = (tx + iw + MARGIN).min(w) - rx;
-            let rh = (ty + ih + MARGIN).min(h) - ry;
-            let reg = src.region(rx, ry, rw, rh);
-            // Network, averaged over flipped / rotated copies.
-            let mut up: Option<Image> = None;
-            for &k in order.iter().take(n_ens) {
-                let o = engine.forward(&reg.dihedral(k)).dihedral_inverse(k);
-                up = Some(match up {
-                    None => o,
-                    Some(mut a) => {
-                        a.px.par_iter_mut().zip(o.px.par_iter()).for_each(|(a, b)| {
-                            for c in 0..3 {
-                                a[c] += b[c];
-                            }
-                        });
-                        a
+    // GPU networks: the next tile's network runs on the GPU (driven from a
+    // helper thread) while this thread post-processes the previous tile on
+    // the CPU. One tile in flight keeps the memory bound.
+    if engine.on_gpu() && grid.len() > 1 && std::env::var_os("PB_NO_OVERLAP").is_none() {
+        tm.overlapped = true;
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        let stop = AtomicBool::new(false);
+        // Microseconds the network thread sat blocked on a full channel:
+        // the GPU idling because post-processing is the bottleneck.
+        let stall = AtomicU64::new(0);
+        let (txc, rxc) = std::sync::mpsc::sync_channel::<(NetTile, f64)>(1);
+        let ok = std::thread::scope(|sc| {
+            let (stop, stall, grid) = (&stop, &stall, &grid);
+            sc.spawn(move || {
+                for &(tx, ty) in grid {
+                    if stop.load(Ordering::Relaxed) {
+                        break;
                     }
-                });
-            }
-            let mut up = up.unwrap();
-            if n_ens > 1 {
-                let inv = 1.0 / n_ens as f32;
-                up.px.par_iter_mut().for_each(|a| {
-                    for c in 0..3 {
-                        a[c] *= inv;
+                    let t0 = Instant::now();
+                    let t = net_tile(engine, src, st, tile, tx, ty);
+                    let net = t0.elapsed().as_secs_f64() * 1000.0;
+                    let t1 = Instant::now();
+                    if txc.send((t, net)).is_err() {
+                        break;
                     }
-                });
-            }
-            if let Some(p) = fid {
-                refine(&reg, &mut up, s, p);
-            }
-            sharpen_detail(&mut up, st.detail, (s as f32 / 4.0).max(0.5));
-            // Fidelity score over the inner part.
-            if let Some((acc, n)) = se.as_mut() {
-                let down = shrink_box(&up, s);
-                for y in (ty - ry)..(ty - ry + ih) {
-                    for x in (tx - rx)..(tx - rx + iw) {
-                        let d = (Image::luma(reg.at(x, y)) - Image::luma(down.at(x, y))) as f64;
-                        *acc += d * d;
-                        *n += 1;
-                    }
+                    stall.fetch_add(t1.elapsed().as_micros() as u64, Ordering::Relaxed);
+                }
+            });
+            let mut ok = true;
+            for (t, net) in rxc.iter() {
+                tm.net.add(net);
+                if !post(t, tm) {
+                    ok = false;
+                    stop.store(true, Ordering::Relaxed);
+                    break;
                 }
             }
-            // Write the inner part.
-            let (ox, oy, rw_o, rh_o);
-            if exact {
-                ox = tx * s;
-                oy = ty * s;
-                rw_o = iw * s;
-                rh_o = ih * s;
-                let (lx, ly) = ((tx - rx) * s, (ty - ry) * s);
-                out.data[(oy * ow) * 4..((oy + rh_o) * ow) * 4].par_chunks_mut(ow * 4).enumerate().for_each(|(y, row)| {
-                    for x in 0..rw_o {
-                        let p = up.px[(ly + y) * up.w + lx + x];
-                        let d = &mut row[(ox + x) * 4..(ox + x) * 4 + 4];
-                        d[0] = to_u8(p[0]);
-                        d[1] = to_u8(p[1]);
-                        d[2] = to_u8(p[2]);
-                        d[3] = 255;
-                    }
-                });
-            } else {
-                let rxs = ow as f64 / mw as f64;
-                let rys = oh as f64 / mh as f64;
-                let first = |a: usize, r: f64, lim: usize| (((a * s) as f64 * r - 0.5).ceil().max(0.0) as usize).min(lim);
-                let (x0, x1) = (first(tx, rxs, ow), first(tx + iw, rxs, ow));
-                let (y0, y1) = (first(ty, rys, oh), first(ty + ih, rys, oh));
-                ox = x0;
-                oy = y0;
-                rw_o = x1 - x0;
-                rh_o = y1 - y0;
-                if rw_o > 0 && rh_o > 0 {
-                    let hx = axis_taps(x0, x1, mw, ow, (rx * s) as isize, up.w, filter);
-                    let hy = axis_taps(y0, y1, mh, oh, (ry * s) as isize, up.h, filter);
-                    // Horizontal over the rows the vertical taps need.
-                    let (rmin, rmax) = (hy.min_idx, hy.max_idx);
-                    let mut mid = vec![[0.0f32; 3]; (rmax - rmin + 1) * rw_o];
-                    mid.par_chunks_mut(rw_o).enumerate().for_each(|(r, row)| {
-                        let src = &up.px[(rmin + r) * up.w..(rmin + r + 1) * up.w];
-                        for (i, o) in row.iter_mut().enumerate() {
-                            let mut acc = [0.0f32; 3];
-                            for (&j, &wt) in hx.idx[i].iter().zip(&hx.w[i]) {
-                                let p = src[j];
-                                acc[0] += wt * p[0];
-                                acc[1] += wt * p[1];
-                                acc[2] += wt * p[2];
-                            }
-                            *o = acc;
-                        }
-                    });
-                    out.data[(oy * ow) * 4..((oy + rh_o) * ow) * 4].par_chunks_mut(ow * 4).enumerate().for_each(|(y, row)| {
-                        for x in 0..rw_o {
-                            let mut acc = [0.0f32; 3];
-                            for (&j, &wt) in hy.idx[y].iter().zip(&hy.w[y]) {
-                                let p = mid[(j - rmin) * rw_o + x];
-                                acc[0] += wt * p[0];
-                                acc[1] += wt * p[1];
-                                acc[2] += wt * p[2];
-                            }
-                            let d = &mut row[(ox + x) * 4..(ox + x) * 4 + 4];
-                            d[0] = to_u8(acc[0]);
-                            d[1] = to_u8(acc[1]);
-                            d[2] = to_u8(acc[2]);
-                            d[3] = 255;
-                        }
-                    });
-                }
-            }
-            *done += 1;
-            let tile_px = out.crop(ox, oy, rw_o, rh_o);
-            let vs = dst.view_scale;
-            let rect = [(ox as f32 * vs) as usize, (oy as f32 * vs) as usize, (rw_o as f32 * vs).ceil() as usize, (rh_o as f32 * vs).ceil() as usize];
-            if !progress(StreamEvent { done: *done, total, rect, pixels: &tile_px }) {
-                return false;
-            }
+            drop(rxc);
+            ok
+        });
+        tm.stall_ms += stall.load(Ordering::Relaxed) as f64 / 1000.0;
+        return ok;
+    }
+    for &(tx, ty) in &grid {
+        let t0 = Instant::now();
+        let t = net_tile(engine, src, st, tile, tx, ty);
+        tm.net.add(t0.elapsed().as_secs_f64() * 1000.0);
+        if !post(t, tm) {
+            return false;
         }
     }
     true
+}
+
+/// Fidelity, detail, fidelity score and the write into the output; returns
+/// the output rectangle written.
+#[allow(clippy::too_many_arguments)]
+fn post_tile(s: usize, st: &Settings, t: NetTile, out: &mut Rgba8, se: &mut Option<(f64, usize)>, mw: usize, mh: usize) -> (usize, usize, usize, usize) {
+    let NetTile { tx, ty, iw, ih, rx, ry, reg, mut up } = t;
+    let (ow, oh) = (out.w, out.h);
+    let fid = st.fidelity.params();
+    if let Some(p) = fid {
+        refine(&reg, &mut up, s, p);
+    }
+    sharpen_detail(&mut up, st.detail, (s as f32 / 4.0).max(0.5));
+    // Fidelity score over the inner part.
+    if let Some((acc, n)) = se.as_mut() {
+        let down = shrink_box(&up, s);
+        for y in (ty - ry)..(ty - ry + ih) {
+            for x in (tx - rx)..(tx - rx + iw) {
+                let d = (Image::luma(reg.at(x, y)) - Image::luma(down.at(x, y))) as f64;
+                *acc += d * d;
+                *n += 1;
+            }
+        }
+    }
+    let exact = ow == mw && oh == mh;
+    let filter = if ow < mw { Filter::Lanczos3 } else { Filter::CatmullRom };
+    // Write the inner part.
+    let (ox, oy, rw_o, rh_o);
+    if exact {
+        ox = tx * s;
+        oy = ty * s;
+        rw_o = iw * s;
+        rh_o = ih * s;
+        let (lx, ly) = ((tx - rx) * s, (ty - ry) * s);
+        out.data[(oy * ow) * 4..((oy + rh_o) * ow) * 4].par_chunks_mut(ow * 4).enumerate().for_each(|(y, row)| {
+            for x in 0..rw_o {
+                let p = up.px[(ly + y) * up.w + lx + x];
+                let d = &mut row[(ox + x) * 4..(ox + x) * 4 + 4];
+                d[0] = to_u8(p[0]);
+                d[1] = to_u8(p[1]);
+                d[2] = to_u8(p[2]);
+                d[3] = 255;
+            }
+        });
+    } else {
+        let rxs = ow as f64 / mw as f64;
+        let rys = oh as f64 / mh as f64;
+        let first = |a: usize, r: f64, lim: usize| (((a * s) as f64 * r - 0.5).ceil().max(0.0) as usize).min(lim);
+        let (x0, x1) = (first(tx, rxs, ow), first(tx + iw, rxs, ow));
+        let (y0, y1) = (first(ty, rys, oh), first(ty + ih, rys, oh));
+        ox = x0;
+        oy = y0;
+        rw_o = x1 - x0;
+        rh_o = y1 - y0;
+        if rw_o > 0 && rh_o > 0 {
+            let hx = axis_taps(x0, x1, mw, ow, (rx * s) as isize, up.w, filter);
+            let hy = axis_taps(y0, y1, mh, oh, (ry * s) as isize, up.h, filter);
+            // Horizontal over the rows the vertical taps need.
+            let (rmin, rmax) = (hy.min_idx, hy.max_idx);
+            let mut mid = vec![[0.0f32; 3]; (rmax - rmin + 1) * rw_o];
+            mid.par_chunks_mut(rw_o).enumerate().for_each(|(r, row)| {
+                let src = &up.px[(rmin + r) * up.w..(rmin + r + 1) * up.w];
+                for (i, o) in row.iter_mut().enumerate() {
+                    let mut acc = [0.0f32; 3];
+                    for (&j, &wt) in hx.idx[i].iter().zip(&hx.w[i]) {
+                        let p = src[j];
+                        acc[0] += wt * p[0];
+                        acc[1] += wt * p[1];
+                        acc[2] += wt * p[2];
+                    }
+                    *o = acc;
+                }
+            });
+            out.data[(oy * ow) * 4..((oy + rh_o) * ow) * 4].par_chunks_mut(ow * 4).enumerate().for_each(|(y, row)| {
+                for x in 0..rw_o {
+                    let mut acc = [0.0f32; 3];
+                    for (&j, &wt) in hy.idx[y].iter().zip(&hy.w[y]) {
+                        let p = mid[(j - rmin) * rw_o + x];
+                        acc[0] += wt * p[0];
+                        acc[1] += wt * p[1];
+                        acc[2] += wt * p[2];
+                    }
+                    let d = &mut row[(ox + x) * 4..(ox + x) * 4 + 4];
+                    d[0] = to_u8(acc[0]);
+                    d[1] = to_u8(acc[1]);
+                    d[2] = to_u8(acc[2]);
+                    d[3] = 255;
+                }
+            });
+        }
+    }
+    (ox, oy, rw_o, rh_o)
 }
 
 struct AxisTaps {
@@ -409,19 +508,20 @@ pub fn upscale(engine: &dyn Upscaler, img: &Image, st: &Settings, lim: Limits, p
     let total = tiles(img.w, img.h) + if two { tiles(img.w * s, img.h * s) } else { 0 };
     let mut done = 0;
     let mut se = Some((0.0f64, 0usize));
+    let mut tm = Timing::default();
     let mut out = Rgba8::new(tw, th);
     if two {
         let mut mid = Rgba8::new(img.w * s, img.h * s);
         let vs = tw as f32 / mid.w as f32;
-        if !run_pass(engine, &rgb, st, PassOut { out: &mut mid, view_scale: vs }, &mut done, total, &mut se, progress) {
+        if !run_pass(engine, &rgb, st, PassOut { out: &mut mid, view_scale: vs }, &mut done, total, &mut se, &mut tm, progress) {
             return None;
         }
         drop(rgb);
         let mut none = None;
-        if !run_pass(engine, &mid, st, PassOut { out: &mut out, view_scale: 1.0 }, &mut done, total, &mut none, progress) {
+        if !run_pass(engine, &mid, st, PassOut { out: &mut out, view_scale: 1.0 }, &mut done, total, &mut none, &mut tm, progress) {
             return None;
         }
-    } else if !run_pass(engine, &rgb, st, PassOut { out: &mut out, view_scale: 1.0 }, &mut done, total, &mut se, progress) {
+    } else if !run_pass(engine, &rgb, st, PassOut { out: &mut out, view_scale: 1.0 }, &mut done, total, &mut se, &mut tm, progress) {
         return None;
     }
     if had_alpha {
@@ -447,6 +547,13 @@ pub fn upscale(engine: &dyn Upscaler, img: &Image, st: &Settings, lim: Limits, p
         seconds: t0.elapsed().as_secs_f64(),
         fidelity_db,
         had_alpha,
+        net_ms: tm.net.sum,
+        post_ms: tm.post_ms,
+        tile_net_p50: tm.net.quantile(0.5),
+        tile_net_p90: tm.net.quantile(0.9),
+        stall_ms: tm.stall_ms,
+        overlapped: tm.overlapped,
+        dehalo: 0.0,
     };
     Some((out, report, capped))
 }

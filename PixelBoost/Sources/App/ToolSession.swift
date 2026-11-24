@@ -40,20 +40,26 @@ final class ToolSession: ObservableObject {
     }
 
     /// Latest-wins preview: while one render runs, only the newest request
-    /// is kept.
-    func preview(_ op: String?) {
+    /// is kept. Slow ops come back as drafts (Rust renders them smaller to
+    /// hold the frame rate); the last one is redone at full quality.
+    func preview(_ op: String?, draftOk: Bool = true) {
         guard let op else { live = nil; histogram = baseHistogram; return }
         guard let base else { pending = op; return }
         if running { pending = op; return }
         running = true
         Task.detached(priority: .userInitiated) {
-            let out = try? Core.engine.editRgba(image: base, opJson: op)
-            let img = out?.uiImage
-            let h = out.map { Core.engine.histogram(image: $0) }
+            let out = try? Core.engine.editRgbaLive(image: base, opJson: op, draftOk: draftOk)
+            let img = out?.image.uiImage
+            let h = out.map { Core.engine.histogram(image: $0.image) }
             await MainActor.run {
                 self.running = false
                 if let img { self.live = img; self.histogram = h }
-                if let next = self.pending { self.pending = nil; self.preview(next) }
+                if let next = self.pending {
+                    self.pending = nil
+                    self.preview(next)
+                } else if out?.draft == true {
+                    self.preview(op, draftOk: false)
+                }
             }
         }
     }

@@ -1484,20 +1484,66 @@ pub fn output_size(w: usize, h: usize, p: &PixelArt) -> (usize, usize) {
     }
 }
 
+/// Telemetry: what the engine made of the picture with these settings —
+/// palette use, dither / outline coverage, sparkles, stage timings. Full
+/// renders always; live previews one in 16.
+#[allow(clippy::too_many_arguments)]
+fn report(p: &PixelArt, aw: usize, ah: usize, cell: usize, pal: &[Lab], idx: &[u16], dz: &[bool], line_px: usize, stars: usize, t_sample: f64, t_palette: f64, ms: f64, src_px: usize) {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static N: AtomicU32 = AtomicU32::new(0);
+    if !crate::telemetry::enabled() {
+        return;
+    }
+    let preview = src_px < 2_000_000;
+    if preview && N.fetch_add(1, Ordering::Relaxed) % 16 != 0 {
+        return;
+    }
+    let n = (aw * ah).max(1) as f64;
+    let mut used = vec![0u32; pal.len()];
+    for i in idx {
+        if let Some(u) = used.get_mut(*i as usize) {
+            *u += 1;
+        }
+    }
+    let colours = used.iter().filter(|u| **u > 0).count();
+    // Share of the most used colour (flat posters vs busy scenes).
+    let top = used.iter().copied().max().unwrap_or(0) as f64 / n;
+    let mut e = crate::telemetry::event("pixelart", "render").ms(ms).flag("preview", preview);
+    if let Ok(v) = serde_json::to_value(p) {
+        e = e.json("p", &v);
+    }
+    e.metric("art_w", aw as f64)
+        .metric("art_h", ah as f64)
+        .metric("cell", cell as f64)
+        .metric("palette", pal.len() as f64)
+        .metric("colours_used", colours as f64)
+        .metric("top_colour_share", top)
+        .metric("dither_share", dz.iter().filter(|z| **z).count() as f64 / n)
+        .metric("outline_share", line_px as f64 / n)
+        .metric("stars", stars as f64)
+        .metric("ms_sample", t_sample)
+        .metric("ms_palette", t_palette)
+        .metric("src_mp", src_px as f64 / 1e6)
+        .emit();
+}
+
 pub fn render(img: &Image, p: &PixelArt) -> Result<Image, String> {
     p.validate()?;
     if img.w == 0 || img.h == 0 {
         return Ok(img.clone());
     }
+    let t0 = std::time::Instant::now();
     let (cell, aw, ah) = grid(img.w, img.h, p);
     let mut art = sample_cells(img, cell, aw, ah, p.lines);
     abstract_pass(&mut art, p.smooth.clamp(0.0, 1.0));
     look(&mut art, p.punch, p.hue_shift);
+    let t_sample = t0.elapsed().as_secs_f64() * 1000.0;
     let stars = sparkle_points(&art, p.sparkle.clamp(0.0, 1.0));
     let mut pal = build_palette(&art, p);
     if p.custom.is_empty() && palette_by_id(&p.palette).is_none() {
         pal.extend(star_colors(&art, &stars));
     }
+    let t_palette = t0.elapsed().as_secs_f64() * 1000.0 - t_sample;
     let edges = edge_map(&art);
     let (mut idx, dz) = quantise(&art, &pal, p, &edges);
     let mut alpha = art.alpha.clone();
@@ -1515,8 +1561,11 @@ pub fn render(img: &Image, p: &PixelArt) -> Result<Image, String> {
         idx.clone()
     };
     rim_light(&mut idx, &alpha, &art.lab, &pal, aw, ah, p.rim, p.light, p.lines);
+    let before_lines = idx.clone();
     outlines(&mut idx, &mut alpha, &base, &art.lab, &pal, aw, ah, &p.outline, p.lines);
+    let line_px = idx.iter().zip(&before_lines).filter(|(a, b)| a != b).count();
     sparkles(&mut idx, &alpha, &art, &pal, p.sparkle.clamp(0.0, 1.0), &stars);
+    report(p, aw, ah, cell, &pal, &idx, &dz, line_px, stars.len(), t_sample, t_palette, t0.elapsed().as_secs_f64() * 1000.0, img.w * img.h);
 
     let rgb: Vec<[f32; 3]> = pal.iter().map(|c| oklab_to_srgb(*c)).collect();
     let small: Vec<[f32; 4]> = idx

@@ -143,6 +143,27 @@ pub fn curve_lut(pts: &[f32], n: usize) -> Vec<f32> {
 }
 
 pub fn adjust(img: &mut Image, a: &Adjustments) {
+    let (w, h) = (img.w, img.h);
+    adjust_at(img, a, Region { y0: 0, full_w: w, full_h: h })
+}
+
+/// Where a strip sits in the full picture (for position-dependent effects:
+/// vignette, grain), so strip-by-strip processing matches the whole-image
+/// result exactly.
+#[derive(Clone, Copy, Debug)]
+pub struct Region {
+    pub y0: usize,
+    pub full_w: usize,
+    pub full_h: usize,
+}
+
+/// Adjustments are strip-safe unless they use neighbourhoods / global
+/// statistics (clarity, texture, dehaze).
+pub fn adjust_is_pointwise(a: &Adjustments) -> bool {
+    a.clarity.abs() <= 1e-3 && a.texture.abs() <= 1e-3 && a.dehaze.abs() <= 1e-3
+}
+
+pub fn adjust_at(img: &mut Image, a: &Adjustments, reg: Region) {
     if *a == Adjustments::default() {
         return;
     }
@@ -151,8 +172,9 @@ pub fn adjust(img: &mut Image, a: &Adjustments) {
     }
     let lut = if a.curve != Adjustments::default().curve { Some(curve_lut(&a.curve, 1024)) } else { None };
     let gain = 2f32.powf(a.exposure);
-    let (w, h) = (img.w as f32, img.h as f32);
+    let (w, h) = (reg.full_w as f32, reg.full_h as f32);
     let width = img.w;
+    let y0 = reg.y0;
     let warm = [
         (1.0 + 0.10 * a.warmth) * (1.0 + 0.04 * a.tint),
         (1.0 + 0.02 * a.warmth) * (1.0 - 0.08 * a.tint),
@@ -219,7 +241,7 @@ pub fn adjust(img: &mut Image, a: &Adjustments) {
             }
         }
         if a.vignette != 0.0 {
-            let (x, y) = ((i % width) as f32 / w - 0.5, (i / width) as f32 / h - 0.5);
+            let (x, y) = ((i % width) as f32 / w - 0.5, (i / width + y0) as f32 / h - 0.5);
             let r = (x * x + y * y).sqrt() / std::f32::consts::FRAC_1_SQRT_2;
             let f = (r * r).powf(1.5).min(1.0);
             if a.vignette > 0.0 {
@@ -242,7 +264,7 @@ pub fn adjust(img: &mut Image, a: &Adjustments) {
         crate::develop::local_contrast(img, a.clarity, a.texture);
     }
     if a.grain > 1e-3 {
-        crate::develop::grain(img, a.grain, a.grain_size);
+        crate::develop::grain_at(img, a.grain, a.grain_size, reg);
     }
 }
 

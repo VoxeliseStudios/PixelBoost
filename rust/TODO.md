@@ -152,3 +152,41 @@ Overall tracker: ../RUST-REMAKE.md
       frames and temporal dither stability).
 - [ ] GPU path not needed (64 MP in ~1 s on CPU); revisit only if previews
       feel slow on older iPhones.
+
+## 5.7 — "Everything pass": 15 upgrades + telemetry (started 2026-11-23)
+
+Plan agreed with the user (all 15 + telemetry on every custom system).
+Order: telemetry core first (so every new system reports from day one),
+then speed, quality, features, Swift screens, CI, release.
+
+- [ ] T  Telemetry: `pb_core::telemetry` (events, metrics, tags, sinks),
+         pb-ffi `Telemetry` (JSONL queue in Caches, batched upload, device
+         context, opt-out), pb-server `telemetry_events` + `telemetry_feedback`
+         + `telemetry_samples` (opt-in crops, 30-day TTL) + summary endpoints,
+         worker posts its own events, CLI `pixelboost telemetry` reports.
+         Instrument: upscale runs (per pass/tile timings, backend, GPU idle,
+         prescale, analyzer features + decision), analyzer, classify, GPU
+         tune/self-check/fallbacks, fusion, editor ops, pixel art, cutout,
+         healing, animation, compare picks, Auto overrides, ratings.
+- [ ] 1  GPU fp16 storage + math (`shader-f16`), checked against the CPU.
+- [ ] 2  aarch64 fp16 CPU kernel (FMLA .8h via asm), tested under qemu.
+- [ ] 3  CPU post-processing of tile n overlapped with GPU network of n+1.
+- [ ] 4  Editor memory: full-res edits on 8-bit strips (pointwise / local
+         ops), f32 only for global ops.
+- [ ] 5  Zoom / spin blur sample count scales with streak length; progressive
+         preview.
+- [ ] 6  int8 weight format (.pbnn v2, per-channel scales) + on-demand model
+         downloads (manifest, sha256, resumable) for rarely used models.
+- [ ] 7  Worker on the iGPU (RADV in the image, /dev/dri) + yield to gamemode.
+- [ ] 8  Own segmentation: pb-nn dilated/strided conv, maxpool, bilinear,
+         U²-Net-p (ships) + IS-Net general-use (download / cloud); guided
+         matting refine; replaces Vision `SubjectMask.swift`.
+- [ ] 9  Ringing / halo detector (earlier upscalers) + de-halo pre-pass.
+- [ ] 10 Healing brush: PatchMatch inpaint with texture-aware patches.
+- [ ] 11 iOS 26 BGContinuedProcessingTask for long upscales.
+- [ ] 12 Batch edits: preset / copied recipe over many photos (Rust batch).
+- [ ] 13 Model compare (crop through every model / variant) + pixel loupe.
+- [ ] 14 Animated GIF / APNG / WebP + video (AVFoundation frame pump in Swift,
+         Apple-required) upscaling with temporal consistency in Rust.
+- [ ] 15 Pixel Art: custom palette editor, arc-length ring dashes, sparkle
+         shape test, skin-aware palette.

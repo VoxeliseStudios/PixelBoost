@@ -377,3 +377,53 @@ ON CONFLICT (model_name) DO UPDATE SET
     is_active = TRUE;
 UPDATE model_registry SET is_active = FALSE
 WHERE model_name IN ('RealESRGAN', 'RealESRGANAnime', 'RealESRNet', 'RealESRGeneralV3', 'BSRGAN', 'RealCUGAN', 'RealESRGANx2', 'RealESRGANAnimeVideo');
+
+-- ---------------------------------------------------------------------------
+-- PixelBoost 5.7 telemetry (added 2026-11-23)
+-- ---------------------------------------------------------------------------
+--
+-- One row per engine / app event. Every custom system reports here:
+-- upscale runs (timings per stage, backend, prescale, memory), the analyzer
+-- (all measurements next to every decision), the GPU engine (init, tuning,
+-- self-check, failures), editor ops, pixel art, cutout, healing, animation,
+-- and the user feedback that judges them (kept / discarded / rating /
+-- Auto overridden / compare pick / mask corrections), joined by run_id.
+-- metrics = numbers, tags = short labels. No pixels, no file names.
+CREATE TABLE IF NOT EXISTS telemetry_events (
+    id BIGSERIAL PRIMARY KEY,
+    device_id VARCHAR(64) NOT NULL,
+    session_id VARCHAR(36),
+    run_id VARCHAR(36),
+    ts TIMESTAMP NOT NULL,
+    received_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    system VARCHAR(40) NOT NULL,
+    name VARCHAR(60) NOT NULL,
+    duration_ms REAL,
+    metrics JSONB NOT NULL DEFAULT '{}'::jsonb,
+    tags JSONB NOT NULL DEFAULT '{}'::jsonb,
+    app_version VARCHAR(20),
+    os_version VARCHAR(20),
+    device_model VARCHAR(50),
+    source VARCHAR(20)
+);
+CREATE INDEX IF NOT EXISTS idx_tm_system ON telemetry_events (system, name, ts);
+CREATE INDEX IF NOT EXISTS idx_tm_run ON telemetry_events (run_id);
+CREATE INDEX IF NOT EXISTS idx_tm_device ON telemetry_events (device_id, ts);
+
+-- Opt-in examples: a matching source / result crop the user chose to send
+-- ("Send this example"), with the reason. Expire after 30 days.
+CREATE TABLE IF NOT EXISTS telemetry_samples (
+    id VARCHAR(36) PRIMARY KEY,
+    device_id VARCHAR(64) NOT NULL,
+    run_id VARCHAR(36),
+    reason VARCHAR(40),
+    note TEXT,
+    app_version VARCHAR(20),
+    device_model VARCHAR(50),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMP NOT NULL,
+    source_jpeg BYTEA NOT NULL,
+    result_jpeg BYTEA NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_tm_samples ON telemetry_samples (created_at);
+CREATE INDEX IF NOT EXISTS idx_tm_samples_run ON telemetry_samples (run_id);

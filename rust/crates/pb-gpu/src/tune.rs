@@ -142,7 +142,7 @@ pub fn autotune(gpu: &Arc<Gpu>) -> Result<TuneResult, String> {
 }
 
 fn device_key(gpu: &Gpu) -> String {
-    format!("{} | {} {} | {:?}", gpu.info.name, gpu.info.driver, gpu.info.driver_info, gpu.info.backend)
+    format!("{} | {} {} | {:?}{}", gpu.info.name, gpu.info.driver, gpu.info.driver_info, gpu.info.backend, if crate::shaders::half() { " | f16" } else { "" })
 }
 
 static CACHE_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
@@ -168,7 +168,17 @@ pub fn ensure(gpu: &Arc<Gpu>) -> Option<TuneResult> {
                     return Some(r);
                 }
             }
-            match autotune(gpu) {
+            let t0 = std::time::Instant::now();
+            let res = autotune(gpu);
+            let mut ev = pb_nn::telemetry::event("gpu", "tune").since(t0).tag("device", &key).flag("ok", res.is_ok());
+            if let Ok(r) = &res {
+                ev = ev.metric("gpu_gflops", r.gpu_gflops).metric("cpu_gflops", r.cpu_gflops);
+                for (i, t) in r.tiles.iter().enumerate() {
+                    ev = ev.tag(&format!("tile{i}"), format!("{t:?}"));
+                }
+            }
+            ev.emit();
+            match res {
                 Ok(r) => {
                     if let Ok(j) = serde_json::to_vec_pretty(&r) {
                         let _ = std::fs::write(&path, j);

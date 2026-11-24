@@ -1,5 +1,16 @@
 //! IEEE 754 binary16 <-> binary32 conversion (round-to-nearest-even).
 
+/// Expand a run of finite f16 values (weights): branch-free bit math the
+/// compiler vectorises (exact for normals, subnormals and zero).
+pub fn expand(src: &[u16], dst: &mut [f32]) {
+    let magic = f32::from_bits((254 - 15) << 23);
+    for (d, s) in dst.iter_mut().zip(src) {
+        let h = *s as u32;
+        let v = f32::from_bits((h & 0x7fff) << 13) * magic;
+        *d = f32::from_bits(v.to_bits() | ((h & 0x8000) << 16));
+    }
+}
+
 pub fn f16_to_f32(h: u16) -> f32 {
     let sign = ((h >> 15) as u32) << 31;
     let exp = ((h >> 10) & 0x1f) as u32;
@@ -70,6 +81,11 @@ mod tests {
         }
         for h in 0u16..0x7c00 {
             assert_eq!(f32_to_f16(f16_to_f32(h)), h);
+            if (h & 0x7c00) != 0x7c00 {
+                let mut d = [0.0f32];
+                expand(&[h], &mut d);
+                assert_eq!(d[0].to_bits(), f16_to_f32(h).to_bits(), "{h:04x}");
+            }
         }
     }
 }

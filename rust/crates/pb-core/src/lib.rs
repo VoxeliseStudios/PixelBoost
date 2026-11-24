@@ -24,6 +24,8 @@ pub mod presets;
 pub mod resample;
 pub mod shape;
 pub mod stream;
+pub mod strips;
+pub mod telemetry;
 pub mod text;
 
 pub use engine::{backend, gpu_name, gpu_note, gpu_speed, set_backend, set_gpu_tune_cache, Backend, Engine, TileEvent, TileOptions, Tuning};

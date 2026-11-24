@@ -23,7 +23,7 @@ pub const FONTS: &[FontInfo] = &[
     FontInfo { id: "mono", name: "Mono", data: include_bytes!("../fonts/NotoSansMono-Bold.ttf") },
 ];
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, serde::Serialize, Debug, Clone)]
 pub struct TextSpec {
     pub text: String,
     /// Centre of the text block, normalised.

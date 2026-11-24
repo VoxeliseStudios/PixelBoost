@@ -50,7 +50,7 @@ pub fn stretches(shape: &str) -> bool {
     matches!(shape, "ellipse" | "squircle" | "rounded" | "arch")
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, serde::Serialize, Debug, Clone)]
 pub struct Ring {
     /// Thickness as a fraction of the shape's size (shorter side).
     #[serde(default = "ring_w")]
@@ -87,7 +87,7 @@ fn dashes() -> f32 {
     24.0
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, serde::Serialize, Debug, Clone)]
 pub struct ShapeCrop {
     pub shape: String,
     /// Crop rectangle, normalised (defaults: the largest centred square).

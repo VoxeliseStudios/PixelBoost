@@ -28,7 +28,8 @@ pub(crate) fn conv(w: &Weights, name: &str) -> Result<Conv3x3, String> {
     if wt.shape.len() != 4 || wt.shape[2] != 3 || wt.shape[3] != 3 {
         return Err(format!("{name}: expected a 3x3 conv, got {:?}", wt.shape));
     }
-    Ok(Conv3x3::from_torch(&wt.data, b.map(|b| b.data.as_slice()), wt.shape[0], wt.shape[1]))
+    let c = Conv3x3::from_torch(&wt.data, b.map(|b| b.data.as_slice()), wt.shape[0], wt.shape[1]);
+    Ok(if crate::conv::half_weights() { c.into_half() } else { c })
 }
 
 pub fn build(w: &Weights) -> Result<Box<dyn SrNetwork>, String> {

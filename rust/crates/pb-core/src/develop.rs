@@ -98,13 +98,23 @@ pub fn local_contrast(img: &mut Image, clarity: f32, texture: f32) {
 /// the midtones.
 pub fn grain(img: &mut Image, amount: f32, size: f32) {
     let (w, h) = (img.w, img.h);
-    let cell = ((0.8 + size.clamp(0.0, 1.0) * 3.2) * w as f32 / 1000.0).max(0.6);
-    let gw = ((w as f32 / cell).ceil() as usize + 2).max(2);
-    let gh = ((h as f32 / cell).ceil() as usize + 2).max(2);
-    let field: Vec<f32> = (0..gw * gh).map(|i| hash_noise((i % gw) as u32, (i / gw) as u32, 7)).collect();
+    grain_at(img, amount, size, crate::edit::Region { y0: 0, full_w: w, full_h: h })
+}
+
+/// Grain on a strip of a bigger picture (same noise field as the whole).
+pub fn grain_at(img: &mut Image, amount: f32, size: f32, reg: crate::edit::Region) {
+    let w = img.w;
+    let cell = ((0.8 + size.clamp(0.0, 1.0) * 3.2) * reg.full_w as f32 / 1000.0).max(0.6);
+    let gw = ((reg.full_w as f32 / cell).ceil() as usize + 2).max(2);
+    // Only the field rows this strip touches.
+    let r0 = (reg.y0 as f32 / cell) as usize;
+    let r1 = (((reg.y0 + img.h) as f32 / cell) as usize + 2).max(r0 + 2);
+    let field: Vec<f32> = (0..gw * (r1 - r0)).map(|i| hash_noise((i % gw) as u32, (r0 + i / gw) as u32, 7)).collect();
+    let gh = r1 - r0;
     img.px.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        let fy = (y + reg.y0) as f32 / cell - r0 as f32;
         for (x, p) in row.iter_mut().enumerate() {
-            let n = sample_plane(&field, gw, gh, x as f32 / cell, y as f32 / cell);
+            let n = sample_plane(&field, gw, gh, x as f32 / cell, fy);
             let l = luma3([p[0], p[1], p[2]]);
             let m = 0.35 + 0.65 * (1.0 - (2.0 * l - 1.0).powi(2));
             let d = n * amount * 0.16 * m;

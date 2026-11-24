@@ -130,6 +130,30 @@ pub(crate) fn fixed_of(s: &UpscaleSettings) -> analyze::Fixed {
 }
 
 /// Whether any field is left on Auto.
+/// Which fields were left on Auto (telemetry: Auto vs user choices).
+pub(crate) fn auto_fields(s: &UpscaleSettings) -> Vec<&'static str> {
+    let mut v = Vec::new();
+    if s.model == "auto" {
+        v.push("model");
+    }
+    if s.scale < 1.0 {
+        v.push("scale");
+    }
+    if s.fidelity == "auto" {
+        v.push("fidelity");
+    }
+    if s.detail < 0.0 {
+        v.push("detail");
+    }
+    if s.ensemble == 0 {
+        v.push("ensemble");
+    }
+    if s.prescale <= 0.0 {
+        v.push("prescale");
+    }
+    v
+}
+
 pub(crate) fn has_auto(s: &UpscaleSettings) -> bool {
     s.model == "auto" || s.scale < 1.0 || s.fidelity == "auto" || s.detail < 0.0 || s.ensemble == 0 || s.prescale <= 0.0
 }

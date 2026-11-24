@@ -496,8 +496,46 @@ fn run_job(app: &App, id: &str, cancel: Arc<AtomicBool>, engines: &mut Option<(S
         );
         !cancel.load(Ordering::SeqCst)
     });
+    let (in_w, in_h) = (img.w, img.h);
+    let fp = pb_core::telemetry::fingerprint(&img);
     drop(img);
     let (out, rep, capped) = res.ok_or("cancelled")?;
+    let (_, peak) = pb_core::telemetry::memory_mb();
+    pb_core::telemetry::event("upscale", "run")
+        .ms(rep.seconds * 1000.0)
+        .tag("outcome", "ok")
+        .tag("where", "cloud")
+        .tag("device", &job.device_id)
+        .tag("img", &fp)
+        .tag("model", &model)
+        .tag("label", &rep.model)
+        .tag("backend", engine.backend())
+        .tag("fidelity", &s.fidelity)
+        .tag("auto", if any_auto { "yes" } else { "" })
+        .metric("in_w", in_w as f64)
+        .metric("in_h", in_h as f64)
+        .metric("out_w", out.w as f64)
+        .metric("out_h", out.h as f64)
+        .metric("scale", s.scale)
+        .metric("detail", s.detail)
+        .metric("denoise", s.denoise)
+        .metric("ensemble", s.ensemble)
+        .metric("realism", realism)
+        .flag("adaptive", adaptive)
+        .metric("prescale", st.prescale)
+        .metric("passes", rep.passes as f64)
+        .metric("tiles", rep.tiles as f64)
+        .metric("fidelity_db", rep.fidelity_db)
+        .flag("capped", capped)
+        .metric("net_ms", rep.net_ms)
+        .metric("post_ms", rep.post_ms)
+        .metric("tile_net_p50", rep.tile_net_p50)
+        .metric("tile_net_p90", rep.tile_net_p90)
+        .metric("stall_ms", rep.stall_ms)
+        .flag("overlapped", rep.overlapped)
+        .metric("dehalo", rep.dehalo)
+        .metric("mem_peak_mb", peak)
+        .emit();
     let ext = if s.format == "jpg" { "jpg" } else { "png" };
     let rp = dir.join(format!("result.{ext}"));
     out.save(&rp.to_string_lossy(), 95)?;
@@ -562,7 +600,23 @@ fn worker_loop(app: App, rt: tokio::runtime::Handle) {
             true,
         );
         println!("job {id}: running");
-        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_job(&app, &id, flag.clone(), &mut engines))).unwrap_or_else(|_| Err("internal error".into()));
+        let t_run = std::time::Instant::now();
+        let r = pb_core::telemetry::scope(&id, || std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_job(&app, &id, flag.clone(), &mut engines))).unwrap_or_else(|_| Err("internal error".into())));
+        if let Some(j) = find(&app, &id) {
+            let outcome = match &r {
+                Ok(()) => "ok",
+                Err(_) if flag.load(Ordering::SeqCst) => "cancelled",
+                Err(_) => "error",
+            };
+            pb_core::telemetry::event("worker", "job")
+                .run(&id)
+                .since(t_run)
+                .tag("device", &j.device_id)
+                .tag("outcome", outcome)
+                .tag("error", r.as_ref().err().map(|e| e.as_str()).unwrap_or(""))
+                .metric("queue_wait_s", j.started_at.unwrap_or(j.created_at) - j.created_at)
+                .emit();
+        }
         app.cancel.lock().unwrap().remove(&id);
         let cancelled = flag.load(Ordering::SeqCst);
         app.update(
@@ -605,6 +659,18 @@ fn load_jobs(app: &Shared) {
     }
 }
 
+static TELEMETRY: std::sync::OnceLock<Arc<pb_core::telemetry::Collector>> = std::sync::OnceLock::new();
+
+/// The bridge pulls the worker's telemetry (it holds the database): every
+/// event recorded since the last pull, at most 5000 per call.
+async fn telemetry_drain() -> Json<Value> {
+    let Some(c) = TELEMETRY.get() else { return Json(json!({"events": []})) };
+    let mut all = c.events.lock().unwrap();
+    let n = all.len().min(5000);
+    let batch: Vec<pb_core::telemetry::Event> = all.drain(..n).collect();
+    Json(json!({"events": batch, "remaining": all.len()}))
+}
+
 async fn sweeper(app: App) {
     loop {
         let t = now();
@@ -640,6 +706,9 @@ async fn main() {
         eprintln!("warning: WORKER_KEY is empty — anyone who can reach this port can submit jobs");
     }
     load_jobs(&app);
+    let col = Arc::new(pb_core::telemetry::Collector::default());
+    let _ = TELEMETRY.set(col.clone());
+    pb_core::telemetry::set_sink(Some(col));
     let (a2, rt) = (app.clone(), tokio::runtime::Handle::current());
     std::thread::Builder::new().name("upscale".into()).spawn(move || worker_loop(a2, rt)).unwrap();
     tokio::spawn(sweeper(app.clone()));
@@ -650,6 +719,7 @@ async fn main() {
         .route("/jobs/{id}", get(get_job).delete(delete_job))
         .route("/jobs/{id}/result", get(result))
         .route("/jobs/{id}/thumb", get(thumb))
+        .route("/telemetry/drain", get(telemetry_drain))
         .layer(middleware::from_fn_with_state(app.clone(), auth))
         .layer(DefaultBodyLimit::max(MAX_UPLOAD))
         .with_state(app);

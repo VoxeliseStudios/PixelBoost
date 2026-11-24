@@ -1,6 +1,7 @@
 //! `pixelboost` — command line front end for the engine and the test bench.
 
 mod eval;
+mod tele;
 
 use pb_core::{models, Engine, Image, TileOptions};
 use std::path::{Path, PathBuf};
@@ -24,7 +25,10 @@ fn usage() -> ! {
   analyze <images...> [--gflops g] [--seconds s] [--cloud] [--degrade soft|noise|jpeg]
                                        measure photos, print the smart settings
   replace <original> <result> <out base>   result + original's EXIF/ICC (JPEG/PNG)
-  shape <in> <out.png> <shape> [ring json]  shape crop with rings"
+  shape <in> <out.png> <shape> [ring json]  shape crop with rings
+  telemetry pull <server> <out.jsonl> [--key k] [--system s] [--hours h]
+  telemetry report <events.jsonl>       tuning reports (speed, feedback, Auto overrides, ...)
+  (PB_TELEMETRY=file.jsonl records any command's engine events)"
     );
     std::process::exit(2)
 }
@@ -69,7 +73,9 @@ fn main() {
     if args.is_empty() {
         usage();
     }
+    tele::init_from_env();
     let res = match args[0].as_str() {
+        "telemetry" => tele::cmd(&args),
         "convert" if args.len() >= 3 => convert(Path::new(&args[1]), Path::new(&args[2])),
         "convert-all" if args.len() >= 3 => {
             let (src, dst) = (Path::new(&args[1]), Path::new(&args[2]));
@@ -150,11 +156,17 @@ fn main() {
                 spec.clone()
             };
             let op = pb_core::ops::parse(&json)?;
-            let img = Image::open(&args[1])?;
             let t = Instant::now();
-            let out = pb_core::ops::apply(&img, &op)?;
-            println!("{}x{} -> {}x{} in {:.0} ms", img.w, img.h, out.w, out.h, t.elapsed().as_secs_f64() * 1000.0);
-            out.save(&args[2])
+            if std::env::var_os("PB_EDIT_LEGACY").is_some() {
+                let img = Image::open(&args[1])?;
+                let out = pb_core::ops::apply(&img, &op)?;
+                println!("{}x{} -> {}x{} in {:.0} ms (legacy)", img.w, img.h, out.w, out.h, t.elapsed().as_secs_f64() * 1000.0);
+                return out.save(&args[2]);
+            }
+            // Same path as the app: strips / in place (bounded memory).
+            let (w, h, _) = pb_core::strips::edit_file(&args[1], &args[2], &op, 95)?;
+            println!("-> {w}x{h} in {:.0} ms", t.elapsed().as_secs_f64() * 1000.0);
+            Ok(())
         })(),
         "presets" => {
             for b in pb_core::presets::BUILTIN {
@@ -175,11 +187,17 @@ fn main() {
             let rings = args.get(4).map(|s| s.as_str()).unwrap_or("[]");
             let json = format!(r#"{{"op":"shape_crop","shape":"{}","rings":{rings}}}"#, args[3]);
             let op = pb_core::ops::parse(&json)?;
-            let img = Image::open(&args[1])?;
             let t = Instant::now();
-            let out = pb_core::ops::apply(&img, &op)?;
-            println!("{}x{} -> {}x{} in {:.0} ms", img.w, img.h, out.w, out.h, t.elapsed().as_secs_f64() * 1000.0);
-            out.save(&args[2])
+            if std::env::var_os("PB_EDIT_LEGACY").is_some() {
+                let img = Image::open(&args[1])?;
+                let out = pb_core::ops::apply(&img, &op)?;
+                println!("{}x{} -> {}x{} in {:.0} ms (legacy)", img.w, img.h, out.w, out.h, t.elapsed().as_secs_f64() * 1000.0);
+                return out.save(&args[2]);
+            }
+            // Same path as the app: strips / in place (bounded memory).
+            let (w, h, _) = pb_core::strips::edit_file(&args[1], &args[2], &op, 95)?;
+            println!("-> {w}x{h} in {:.0} ms", t.elapsed().as_secs_f64() * 1000.0);
+            Ok(())
         })(),
         "classify" if args.len() >= 2 => args[1..].iter().try_for_each(|f| {
             let img = Image::open(f)?;
@@ -189,6 +207,7 @@ fn main() {
         }),
         _ => usage(),
     };
+    tele::finish();
     if let Err(e) = res {
         eprintln!("error: {e}");
         std::process::exit(1);

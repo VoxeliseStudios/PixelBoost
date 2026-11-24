@@ -64,6 +64,25 @@ pub struct Report {
     /// Source vs result shrunk back (dB). Higher = more faithful.
     pub fidelity_db: f64,
     pub had_alpha: bool,
+    /// Where the time went (streamed runs): network vs post-processing
+    /// (fidelity, detail, resample, write), per-tile network p50 / p90, and
+    /// whether post-processing ran beside the GPU network.
+    #[serde(default)]
+    pub net_ms: f64,
+    #[serde(default)]
+    pub post_ms: f64,
+    #[serde(default)]
+    pub tile_net_p50: f64,
+    #[serde(default)]
+    pub tile_net_p90: f64,
+    /// Time the network waited for post-processing (pipelined runs).
+    #[serde(default)]
+    pub stall_ms: f64,
+    #[serde(default)]
+    pub overlapped: bool,
+    /// Ringing removed before the network (`dehalo`), 0 = none.
+    #[serde(default)]
+    pub dehalo: f32,
 }
 
 /// Give fully transparent pixels the colour of their nearest visible
@@ -217,6 +236,7 @@ pub fn upscale(engine: &Engine, img: &Image, st: &Settings, progress: &mut dyn F
         seconds: t.elapsed().as_secs_f64(),
         fidelity_db: fid,
         had_alpha,
+        ..Default::default()
     };
     Some((out, report))
 }

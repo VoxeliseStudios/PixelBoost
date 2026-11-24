@@ -1741,6 +1741,7 @@ dependencies = [
  "pb-nn",
  "rayon",
  "serde_json",
+ "ureq",
 ]
 
 [[package]]

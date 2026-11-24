@@ -6,6 +6,7 @@
 use pb_core::fidelity::Fidelity;
 use pb_core::image::Format;
 use pb_core::pipeline::Settings;
+use pb_core::fusion::Upscaler;
 use pb_core::{classify, models, ops, Engine, Image};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -17,6 +18,7 @@ pub mod history;
 pub mod pixel;
 pub mod server;
 pub mod smart;
+pub mod telemetry;
 
 uniffi::setup_scaffolding!();
 
@@ -86,6 +88,8 @@ pub struct UpscaleOutcome {
     pub adaptive: bool,
     /// The input was first shrunk to this fraction (its real resolution).
     pub prescale: f32,
+    /// Telemetry run id (feedback about this result refers to it).
+    pub run_id: String,
 }
 
 #[derive(uniffi::Record, Clone)]
@@ -128,6 +132,21 @@ pub struct RgbaImage {
     pub height: u32,
     pub rgba: Vec<u8>,
 }
+
+/// A live preview frame: `draft` = rendered smaller and scaled up because
+/// the op is too slow for the frame budget at full preview size; render
+/// once more with `draft_ok = false` when the user stops moving.
+#[derive(uniffi::Record, Clone)]
+pub struct LivePreview {
+    pub image: RgbaImage,
+    pub draft: bool,
+    pub ms: f64,
+}
+
+/// Recent cost of each op on previews, ms per megapixel (moving average).
+static PREVIEW_COST: Mutex<Option<HashMap<String, f64>>> = Mutex::new(None);
+/// Frame budget for a live preview (ms).
+const LIVE_BUDGET_MS: f64 = 18.0;
 
 /// Receives live progress. `rgba` is the finished tile's pixels (straight
 /// RGBA8, `pixel_w` x `pixel_h`) to draw into the rectangle (`x`,`y`,`w`,`h`)
@@ -285,10 +304,31 @@ impl PixelBoostCore {
     }
 
     pub fn upscale(&self, input_path: String, output_path: String, settings: UpscaleSettings, listener: Arc<dyn UpscaleListener>, cancel: Arc<CancelToken>) -> Result<UpscaleOutcome, PbError> {
+        let run = pb_core::telemetry::new_run_id();
+        let t0 = std::time::Instant::now();
+        let r = pb_core::telemetry::scope(&run, || self.upscale_inner(&run, input_path, output_path, settings.clone(), listener, cancel));
+        if let Err(e) = &r {
+            let (outcome, msg) = match e {
+                PbError::Cancelled => ("cancelled", String::new()),
+                PbError::Failed { message } => ("error", message.clone()),
+            };
+            pb_core::telemetry::event("upscale", "run").run(&run).since(t0).tag("outcome", outcome).tag("error", msg).tag("model", &settings.model).emit();
+        }
+        r
+    }
+
+}
+
+impl PixelBoostCore {
+    fn upscale_inner(&self, run: &str, input_path: String, output_path: String, settings: UpscaleSettings, listener: Arc<dyn UpscaleListener>, cancel: Arc<CancelToken>) -> Result<UpscaleOutcome, PbError> {
+        let asked = settings.clone();
         // Anything still on Auto is decided from the photo (with a default
         // phone budget; the app resolves with its learned speed first).
         let settings = if smart::has_auto(&settings) { self.resolve(input_path.clone(), settings, 40.0, 180.0, false)?.settings } else { settings };
+        let t_load = std::time::Instant::now();
         let img = Image::open(&input_path)?;
+        let load_ms = t_load.elapsed().as_secs_f64() * 1000.0;
+        let fp = if pb_core::telemetry::enabled() { pb_core::telemetry::fingerprint(&img) } else { String::new() };
         let model = settings.model.clone();
         let denoise = if model == "fast" && settings.denoise > 0.0 { Some(settings.denoise) } else { None };
         let realism = if settings.realism > 0.0 { settings.realism.min(1.0) } else { 1.0 };
@@ -333,9 +373,53 @@ impl PixelBoostCore {
             listener.on_tile(e.done as u32, e.total as u32, x as u32, y as u32, w as u32, h as u32, pw, ph, rgba);
             !cancel.is_cancelled()
         });
+        let (in_w, in_h) = (img.w, img.h);
         drop(img);
         let (out, rep, capped) = res.ok_or(PbError::Cancelled)?;
+        let t_save = std::time::Instant::now();
         out.save(&output_path, 95)?;
+        let save_ms = t_save.elapsed().as_secs_f64() * 1000.0;
+        let (mem, peak) = pb_core::telemetry::memory_mb();
+        let auto: Vec<&str> = smart::auto_fields(&asked);
+        pb_core::telemetry::event("upscale", "run")
+            .ms(rep.seconds * 1000.0)
+            .tag("outcome", "ok")
+            .tag("img", &fp)
+            .tag("model", &model)
+            .tag("label", &rep.model)
+            .tag("backend", stack.backend())
+            .tag("fidelity", format!("{fidelity:?}"))
+            .tag("auto", auto.join(","))
+            .metric("in_w", in_w as f64)
+            .metric("in_h", in_h as f64)
+            .metric("out_w", out.w as f64)
+            .metric("out_h", out.h as f64)
+            .metric("scale", settings.scale)
+            .metric("detail", settings.detail)
+            .metric("denoise", settings.denoise)
+            .metric("ensemble", settings.ensemble)
+            .metric("tile", settings.tile)
+            .metric("realism", realism)
+            .flag("adaptive", settings.adaptive)
+            .metric("prescale", st.prescale)
+            .metric("passes", rep.passes as f64)
+            .metric("tiles", rep.tiles as f64)
+            .metric("fidelity_db", rep.fidelity_db)
+            .flag("capped", capped)
+            .flag("alpha", rep.had_alpha)
+            .metric("gflop", Upscaler::macs_per_px(&stack) * 2.0 * (in_w * in_h) as f64 * st.prescale.powi(2) as f64 * rep.passes.max(1) as f64 / 1e9)
+            .metric("net_ms", rep.net_ms)
+            .metric("post_ms", rep.post_ms)
+            .metric("tile_net_p50", rep.tile_net_p50)
+            .metric("tile_net_p90", rep.tile_net_p90)
+            .metric("stall_ms", rep.stall_ms)
+            .flag("overlapped", rep.overlapped)
+            .metric("dehalo", rep.dehalo)
+            .metric("load_ms", load_ms)
+            .metric("save_ms", save_ms)
+            .metric("mem_mb", mem)
+            .metric("mem_peak_mb", peak)
+            .emit();
         Ok(UpscaleOutcome {
             output_path,
             width: out.w as u32,
@@ -349,17 +433,21 @@ impl PixelBoostCore {
             backend: stack.backend(),
             adaptive: matches!(stack, pb_core::fusion::Stack::Fused(_)),
             prescale: st.prescale,
+            run_id: run.to_string(),
         })
     }
+}
+
+#[uniffi::export]
+impl PixelBoostCore {
 
     /// Run one editing operation (JSON, see pb_core::ops::Op) file to file.
     pub fn edit_file(&self, input_path: String, output_path: String, op_json: String) -> Result<ImageInfo, PbError> {
-        let img = Image::open(&input_path)?;
+        // Strips for pointwise ops, in place / consuming for the rest
+        // (bounded memory on 48 MP photos).
         let op = ops::parse(&op_json)?;
-        let out = ops::apply(&img, &op)?;
-        let bytes = out.encode(fmt_for(&output_path), 95)?;
-        std::fs::write(&output_path, bytes).map_err(|e| PbError::from(e.to_string()))?;
-        Ok(ImageInfo { path: output_path, width: out.w as u32, height: out.h as u32, has_alpha: out.has_alpha() })
+        let (w, h, a) = pb_core::strips::edit_file(&input_path, &output_path, &op, 95)?;
+        Ok(ImageInfo { path: output_path, width: w as u32, height: h as u32, has_alpha: a })
     }
 
     /// Same, on an in-memory RGBA8 buffer (live previews).
@@ -367,6 +455,42 @@ impl PixelBoostCore {
         let img = from_rgba(&image)?;
         let op = ops::parse(&op_json)?;
         Ok(to_rgba(&ops::apply(&img, &op)?))
+    }
+
+    /// Live preview while a control moves: ops that would miss the frame
+    /// budget at this size render at a smaller size (resolution-independent
+    /// parameters, so it looks the same, a little softer) and come back
+    /// flagged `draft`.
+    pub fn edit_rgba_live(&self, image: RgbaImage, op_json: String, draft_ok: bool) -> Result<LivePreview, PbError> {
+        let t0 = std::time::Instant::now();
+        let op = ops::parse(&op_json)?;
+        let name = ops::op_name(&op);
+        let img = from_rgba(&image)?;
+        let mp = (img.w * img.h) as f64 / 1e6;
+        let est = PREVIEW_COST.lock().unwrap().as_ref().and_then(|m| m.get(&name).copied()).map(|c| c * mp);
+        let f = match est {
+            Some(e) if draft_ok && e > LIVE_BUDGET_MS && !op.changes_geometry() => (LIVE_BUDGET_MS / e).sqrt().clamp(0.35, 0.9),
+            _ => 1.0,
+        };
+        let out = if f < 1.0 {
+            let (sw, sh) = (((img.w as f64 * f) as usize).max(8), ((img.h as f64 * f) as usize).max(8));
+            let small = pb_core::resample::resize(&img, sw, sh, pb_core::resample::Filter::Box);
+            let o = ops::apply(&small, &op)?;
+            pb_core::resample::resize(&o, img.w, img.h, pb_core::resample::Filter::CatmullRom)
+        } else {
+            let o = ops::apply(&img, &op)?;
+            let per_mp = t0.elapsed().as_secs_f64() * 1000.0 / mp.max(1e-3);
+            let mut g = PREVIEW_COST.lock().unwrap();
+            let m = g.get_or_insert_with(HashMap::new);
+            let e = m.entry(name.clone()).or_insert(per_mp);
+            *e = *e * 0.6 + per_mp * 0.4;
+            o
+        };
+        let ms = t0.elapsed().as_secs_f64() * 1000.0;
+        if f < 1.0 {
+            pb_core::telemetry::sample("editor", "draft", &name, ms);
+        }
+        Ok(LivePreview { image: to_rgba(&out), draft: f < 1.0, ms })
     }
 
     /// Decode any supported file to RGBA8, shrunk to fit `max_side`.

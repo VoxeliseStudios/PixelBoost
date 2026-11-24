@@ -7,7 +7,7 @@ use crate::image::Image;
 use rayon::prelude::*;
 use serde::Deserialize;
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, serde::Serialize, Debug, Clone)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Mark {
     Stroke {

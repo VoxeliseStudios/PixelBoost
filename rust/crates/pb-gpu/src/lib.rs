@@ -57,6 +57,14 @@ pub fn paused() -> bool {
 
 static GPU: Mutex<Option<Option<Arc<Gpu>>>> = Mutex::new(None);
 
+/// f16 storage failed the self-check on this device: stay on f32.
+static NO_HALF: AtomicBool = AtomicBool::new(false);
+
+/// Whether feature maps and weights are stored as f16.
+pub fn half() -> bool {
+    shaders::half()
+}
+
 /// Why there is no GPU (no adapter, software only, failed self-check).
 static UNAVAILABLE: Mutex<Option<String>> = Mutex::new(None);
 
@@ -77,17 +85,35 @@ impl Gpu {
             if std::env::var("PB_GPU").map(|v| v == "0" || v == "off").unwrap_or(false) {
                 return None;
             }
-            let g = match Gpu::init() {
+            let mut g = match Gpu::init() {
                 Ok(g) => Arc::new(g),
                 Err(e) => {
                     eprintln!("pb-gpu: no GPU backend ({e}); using the CPU");
+                    pb_nn::telemetry::event("gpu", "unavailable").tag("reason", &e).emit();
                     *UNAVAILABLE.lock().unwrap() = Some(e);
                     return None;
                 }
             };
+            pb_nn::telemetry::event("gpu", "init").tag("device", g.describe()).tag("driver", format!("{} {}", g.info.driver, g.info.driver_info)).tag("type", format!("{:?}", g.info.device_type)).emit();
             // Never trust a GPU that can't reproduce the CPU networks.
             if std::env::var("PB_GPU_NOCHECK").is_err() {
-                if let Err(e) = check::self_check(&g) {
+                let t0 = std::time::Instant::now();
+                let mut r = check::self_check(&g);
+                pb_nn::telemetry::event("gpu", "self_check").since(t0).tag("device", g.describe()).flag("ok", r.is_ok()).flag("half", shaders::half()).tag("error", r.as_ref().err().map(|s| s.as_str()).unwrap_or("")).emit();
+                if r.is_err() && shaders::half() {
+                    // Try again with f32 storage before giving up on the GPU.
+                    eprintln!("pb-gpu: f16 storage failed the self-check ({}); retrying with f32", r.as_ref().unwrap_err());
+                    NO_HALF.store(true, Ordering::Relaxed);
+                    match Gpu::init() {
+                        Ok(g2) => {
+                            g = Arc::new(g2);
+                            r = check::self_check(&g);
+                            pb_nn::telemetry::event("gpu", "self_check").tag("device", g.describe()).flag("ok", r.is_ok()).flag("half", false).tag("error", r.as_ref().err().map(|s| s.as_str()).unwrap_or("")).emit();
+                        }
+                        Err(e) => r = Err(e),
+                    }
+                }
+                if let Err(e) = r {
                     eprintln!("pb-gpu: {} failed the self-check ({e}); using the CPU", g.describe());
                     *UNAVAILABLE.lock().unwrap() = Some(format!("{} failed the self-check: {e}", g.describe()));
                     return None;
@@ -115,11 +141,12 @@ impl Gpu {
 
     /// "Apple A17 Pro GPU (Metal)" etc.
     pub fn describe(&self) -> String {
-        format!("{} ({:?})", self.info.name, self.info.backend)
+        format!("{} ({:?}{})", self.info.name, self.info.backend, if shaders::half() { ", f16" } else { "" })
     }
 
     pub(crate) fn mark_broken(&self, why: &str) {
         eprintln!("pb-gpu: disabling the GPU backend: {why}");
+        pb_nn::telemetry::event("gpu", "disabled").tag("device", self.describe()).tag("why", why).emit();
         BROKEN.store(true, Ordering::Relaxed);
     }
 
@@ -145,9 +172,12 @@ impl Gpu {
             max_storage_buffers_per_shader_stage: al.max_storage_buffers_per_shader_stage.min(8),
             ..wgpu::Limits::downlevel_defaults()
         };
+        // f16 storage halves every feature map and the weight bandwidth.
+        let half = adapter.features().contains(wgpu::Features::SHADER_F16) && std::env::var("PB_GPU_F16").map(|v| v != "0").unwrap_or(true) && !NO_HALF.load(Ordering::Relaxed);
+        crate::shaders::set_half(half);
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("pixelboost"),
-            required_features: wgpu::Features::empty(),
+            required_features: if half { wgpu::Features::SHADER_F16 } else { wgpu::Features::empty() },
             required_limits: limits.clone(),
             memory_hints: wgpu::MemoryHints::Performance,
             ..Default::default()
@@ -156,6 +186,7 @@ impl Gpu {
         device.on_uncaptured_error(Arc::new(|e| eprintln!("pb-gpu: uncaptured error: {e}")));
         device.set_device_lost_callback(|reason, msg| {
             eprintln!("pb-gpu: device lost ({reason:?}): {msg}");
+            pb_nn::telemetry::event("gpu", "device_lost").tag("reason", format!("{reason:?}")).tag("msg", &msg).emit();
             BROKEN.store(true, Ordering::Relaxed);
         });
         let storage = |binding: u32, read_only: bool| wgpu::BindGroupLayoutEntry {

@@ -21,9 +21,52 @@ pub struct Conv3x3 {
     pub cin: usize,
     pub cout: usize,
     /// `[cout_pad/16][9][cin][16]`
-    pub packed: Vec<f32>,
+    pub packed: Packed,
     /// Padded to a multiple of 16.
     pub bias: Vec<f32>,
+}
+
+/// Packed weights: f32, or f16 (half the memory; each 16-channel block is
+/// expanded to f32 once per output row, <1% of the row's arithmetic). The
+/// .pbnn files are f16 already, so f16 packing loses nothing for them.
+pub enum Packed {
+    F32(Vec<f32>),
+    F16(Vec<u16>),
+}
+
+impl Packed {
+    pub fn len(&self) -> usize {
+        match self {
+            Packed::F32(v) => v.len(),
+            Packed::F16(v) => v.len(),
+        }
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    pub fn bytes(&self) -> usize {
+        match self {
+            Packed::F32(v) => v.len() * 4,
+            Packed::F16(v) => v.len() * 2,
+        }
+    }
+    /// Element `i` as f32.
+    pub fn get(&self, i: usize) -> f32 {
+        match self {
+            Packed::F32(v) => v[i],
+            Packed::F16(v) => crate::half::f16_to_f32(v[i]),
+        }
+    }
+}
+
+thread_local! {
+    static SCRATCH: std::cell::RefCell<Vec<f32>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Keep CPU weights as f16 (default; `PB_CPU_F32W=1` keeps f32).
+pub fn half_weights() -> bool {
+    static H: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *H.get_or_init(|| std::env::var_os("PB_CPU_F32W").is_none())
 }
 
 impl Conv3x3 {
@@ -44,7 +87,23 @@ impl Conv3x3 {
         if let Some(b) = b {
             bias[..cout].copy_from_slice(b);
         }
-        Conv3x3 { cin, cout, packed, bias }
+        Conv3x3 { cin, cout, packed: Packed::F32(packed), bias }
+    }
+
+    /// Store the packed weights as f16 (see [`Packed`]).
+    pub fn into_half(mut self) -> Self {
+        if let Packed::F32(v) = &self.packed {
+            self.packed = Packed::F16(v.iter().map(|x| crate::half::f32_to_f16(*x)).collect());
+        }
+        self
+    }
+
+    /// Packed weights as f32 (for uploads to other backends).
+    pub fn packed_f32(&self) -> Vec<f32> {
+        match &self.packed {
+            Packed::F32(v) => v.clone(),
+            Packed::F16(v) => v.iter().map(|h| crate::half::f16_to_f32(*h)).collect(),
+        }
     }
 
     pub fn blocks(&self) -> usize {
@@ -197,11 +256,20 @@ fn run(kern: Kernel, inp: Raw, cin_off: usize, conv: &Conv3x3, out: RawMut, cout
     let oc = out.c;
     let op = SendMut(out.p);
 
-    (0..h).into_par_iter().for_each(|y| {
+    (0..h).into_par_iter().for_each(|y| SCRATCH.with(|scratch| {
         let op = op;
         let mut acc = [[0.0f32; NR]; MR];
+        let mut scratch = scratch.borrow_mut();
         for cb in 0..blocks {
-            let wp = conv.packed[cb * block_len..].as_ptr();
+            let wp = match &conv.packed {
+                Packed::F32(v) => v[cb * block_len..].as_ptr(),
+                Packed::F16(v) => {
+                    // Expand this block once for the whole row.
+                    scratch.resize(block_len, 0.0);
+                    crate::half::expand(&v[cb * block_len..(cb + 1) * block_len], &mut scratch[..]);
+                    scratch.as_ptr()
+                }
+            };
             let ncols = NR.min(cout - cb * NR);
             let bias = &conv.bias[cb * NR..cb * NR + NR];
             let mut x = 0;
@@ -256,7 +324,7 @@ fn run(kern: Kernel, inp: Raw, cin_off: usize, conv: &Conv3x3, out: RawMut, cout
                 x += MR;
             }
         }
-    });
+    }));
 }
 
 #[derive(Clone, Copy)]

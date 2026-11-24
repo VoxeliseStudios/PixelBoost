@@ -25,7 +25,9 @@ fn compare(w: &Weights, shapes: &[(usize, usize)]) {
         let b = pb_nn::SrNetwork::forward(&net, &x);
         let worst = max_diff(&a, &b);
         eprintln!("{} {h}x{wd}: max |cpu - gpu| = {worst:e} ({})", w.header.arch, pb_nn::SrNetwork::backend(&net));
-        assert!(worst < 2e-3, "{h}x{wd}: GPU differs from CPU by {worst}");
+        // f16 storage keeps ~3 significant digits per feature map.
+        let tol = if pb_gpu::half() { 1e-2 } else { 2e-3 };
+        assert!(worst < tol, "{h}x{wd}: GPU differs from CPU by {worst}");
     }
 }
 

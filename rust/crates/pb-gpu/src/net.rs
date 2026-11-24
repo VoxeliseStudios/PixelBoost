@@ -267,7 +267,7 @@ impl Program {
 
     fn bytes(&self, i: usize, h: usize, w: usize) -> u64 {
         let b = self.bufs[i];
-        ((h * b.mul + 2) * (w * b.mul + 2) * b.ch * 4) as u64
+        ((h * b.mul + 2) * (w * b.mul + 2) * b.ch * crate::shaders::elem_bytes()) as u64
     }
 }
 
@@ -370,7 +370,8 @@ impl GpuNet {
             "srvgg" => Program::srvgg(w)?,
             a => return Err(format!("unknown architecture {a}")),
         };
-        let bytes: &[u8] = bytemuck_f32(&prog.arena);
+        let stored = store_bytes(&prog.arena);
+        let bytes: &[u8] = &stored;
         if bytes.len() as u64 > gpu.max_binding {
             return Err(format!("weights ({} MB) exceed the GPU's binding limit", bytes.len() >> 20));
         }
@@ -441,7 +442,7 @@ impl GpuNet {
         }
         prog.ops.push(op);
         use wgpu::util::DeviceExt;
-        let wts = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("conv weights"), contents: bytemuck_f32(&prog.arena), usage: wgpu::BufferUsages::STORAGE });
+        let wts = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("conv weights"), contents: &store_bytes(&prog.arena), usage: wgpu::BufferUsages::STORAGE });
         let dummy = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some("dummy"), size: 16, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
         prog.arena = Vec::new();
         Ok(GpuNet { gpu, prog, wts, dummy, state: Mutex::new(None), fallback: Box::new(|| Err("single conv".into())), cpu: Mutex::new(None), failed: Default::default() })
@@ -474,7 +475,8 @@ impl GpuNet {
     fn ensure(&self, st: &mut Option<State>, h: usize, w: usize) -> bool {
         let gpu = &self.gpu;
         let p = &self.prog;
-        let need: Vec<u64> = (0..p.bufs.len()).map(|i| p.bytes(i, h, w).max(16)).collect();
+        // Bindings and copies need 4-byte multiples (f16 maps can be odd).
+        let need: Vec<u64> = (0..p.bufs.len()).map(|i| p.bytes(i, h, w).max(16).div_ceil(16) * 16).collect();
         let grow = match st {
             None => true,
             Some(s) => s.caps.iter().zip(&need).any(|(c, n)| n > c),
@@ -584,7 +586,7 @@ impl GpuNet {
             }
         }
         let in_len = (h + 2) * (w + 2) * x.c;
-        gpu.queue.write_buffer(&s.bufs[0], 0, bytemuck_f32(&x.data[..in_len]));
+        gpu.queue.write_buffer(&s.bufs[0], 0, &store_bytes(&x.data[..in_len]));
         let mut acc = 0.0;
         let mut prof: Vec<(String, f64, f64)> = Vec::new();
         let mut k = 0;
@@ -636,7 +638,8 @@ impl GpuNet {
                 eprintln!("  {n:<60} x{c:<4} {:>8.1} ms {:>7.1} GFLOP/s", t * 1e3, f / t / 1e9);
             }
         }
-        let out_bytes = p.bytes(p.out, h, w);
+        let used_bytes = p.bytes(p.out, h, w);
+        let out_bytes = used_bytes.div_ceil(8) * 8;
         enc.copy_buffer_to_buffer(&s.bufs[p.out], 0, &s.staging, 0, Some(out_bytes));
         gpu.queue.submit([enc.finish()]);
         let slice = s.staging.slice(..out_bytes);
@@ -656,9 +659,16 @@ impl GpuNet {
         let mut out = Fmap::new(h * ob.mul, w * ob.mul, ob.ch);
         {
             let view = slice.get_mapped_range();
-            let n = out_bytes as usize / 4;
-            for (d, c) in out.data[..n].iter_mut().zip(view.chunks_exact(4)) {
-                *d = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+            if crate::shaders::half() {
+                let n = used_bytes as usize / 2;
+                for (d, c) in out.data[..n].iter_mut().zip(view.chunks_exact(2)) {
+                    *d = pb_nn::half::f16_to_f32(u16::from_le_bytes([c[0], c[1]]));
+                }
+            } else {
+                let n = used_bytes as usize / 4;
+                for (d, c) in out.data[..n].iter_mut().zip(view.chunks_exact(4)) {
+                    *d = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+                }
             }
         }
         s.staging.unmap();
@@ -715,6 +725,23 @@ fn sub_fmap(x: &Fmap, y0: usize, x0: usize, h: usize, w: usize) -> Fmap {
         o.data[d..d + w * x.c].copy_from_slice(&x.data[s..s + w * x.c]);
     }
     o
+}
+
+/// Values as stored on the GPU (f32, or f16 with `shaders::half()`).
+fn store_bytes(v: &[f32]) -> std::borrow::Cow<'_, [u8]> {
+    if crate::shaders::half() {
+        let mut b = Vec::with_capacity(v.len() * 2 + 8);
+        for x in v {
+            b.extend_from_slice(&pb_nn::half::f32_to_f16(*x).to_le_bytes());
+        }
+        // Buffers are 4-byte multiples.
+        while b.len() % 8 != 0 {
+            b.push(0);
+        }
+        std::borrow::Cow::Owned(b)
+    } else {
+        std::borrow::Cow::Borrowed(bytemuck_f32(v))
+    }
 }
 
 fn bytemuck_f32(v: &[f32]) -> &[u8] {

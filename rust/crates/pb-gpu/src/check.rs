@@ -114,7 +114,9 @@ fn net_case(gpu: &Arc<Gpu>, w: &Weights, h: usize, wd: usize) -> Result<f32, Str
 pub fn self_check(gpu: &Arc<Gpu>) -> Result<(), String> {
     for (name, w, h, wd) in [("rrdb x4", rrdb(4, 1, 1), 10, 13), ("rrdb x2", rrdb(2, 1, 2), 10, 12), ("srvgg", srvgg(2, 3), 9, 11)] {
         let d = net_case(gpu, &w, h, wd).map_err(|e| format!("{name}: {e}"))?;
-        if !(d < 2e-3) {
+        // f16 storage rounds every feature map to ~3 significant digits.
+        let tol = if crate::shaders::half() { 1e-2 } else { 2e-3 };
+        if !(d < tol) {
             return Err(format!("{name}: GPU differs from CPU by {d:e}"));
         }
     }

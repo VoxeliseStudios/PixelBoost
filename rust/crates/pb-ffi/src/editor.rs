@@ -129,6 +129,15 @@ impl PixelBoostCore {
     /// Final export: optional long-side limit, format from the extension
     /// (jpg / png / webp / tiff), JPEG quality 1..100.
     pub fn export_file(&self, input_path: String, output_path: String, quality: u8, max_side: u32) -> Result<ImageInfo, PbError> {
+        let fmt = Format::from_path(&output_path);
+        let dims = pb_core::image::dimensions(&std::fs::read(&input_path).map_err(|e| PbError::from(e.to_string()))?).ok();
+        let fits = dims.map(|(w, h)| max_side == 0 || w.max(h) <= max_side as usize).unwrap_or(false);
+        if fits && fmt != Format::Tiff {
+            // Same size, 8-bit output: no float copy needed (4 B/px).
+            let buf = pb_core::strips::open_rgba8(&input_path)?;
+            buf.save(&output_path, quality.clamp(1, 100))?;
+            return Ok(ImageInfo { width: buf.w as u32, height: buf.h as u32, has_alpha: buf.has_alpha(), path: output_path });
+        }
         let mut img = Image::open(&input_path)?;
         if max_side > 0 && img.w.max(img.h) > max_side as usize {
             let f = max_side as f32 / img.w.max(img.h) as f32;
