@@ -2,6 +2,7 @@
 //! so the Swift panel only shows controls bound to [`PixelArtSettings`].
 
 use crate::PixelBoostCore;
+use crate::{PbError, RgbaImage};
 use pb_core::pixelart::{self, PixelArt};
 
 /// Every control of the Pixel Art panel.
@@ -27,6 +28,8 @@ pub struct PixelArtSettings {
     pub cleanup: bool,
     /// Output 1 px per art pixel instead of the photo's size.
     pub native: bool,
+    /// A custom palette (0xRRGGBB); when set it replaces `palette`.
+    pub custom: Vec<u32>,
 }
 
 impl From<PixelArt> for PixelArtSettings {
@@ -47,6 +50,7 @@ impl From<PixelArt> for PixelArtSettings {
             sparkle: p.sparkle,
             cleanup: p.cleanup,
             native: p.native,
+            custom: p.custom.iter().map(|c| hex(*c)).collect(),
         }
     }
 }
@@ -69,6 +73,7 @@ impl From<&PixelArtSettings> for PixelArt {
             sparkle: s.sparkle,
             cleanup: s.cleanup,
             native: s.native,
+            custom: s.custom.iter().take(256).map(|c| unhex(*c)).collect(),
             ..PixelArt::default()
         }
     }
@@ -96,6 +101,10 @@ pub struct PixelPalette {
 pub struct PixelOption {
     pub id: String,
     pub name: String,
+}
+
+fn unhex(c: u32) -> [f32; 3] {
+    [((c >> 16) & 255) as f32 / 255.0, ((c >> 8) & 255) as f32 / 255.0, (c & 255) as f32 / 255.0]
 }
 
 fn hex(c: [f32; 3]) -> u32 {
@@ -142,10 +151,72 @@ impl PixelBoostCore {
         let mut v = serde_json::to_value(&p).unwrap_or_default();
         v["op"] = "pixel_art".into();
         if let Some(o) = v.as_object_mut() {
-            o.remove("custom");
+            if settings.custom.is_empty() {
+                o.remove("custom");
+            }
             o.remove("cell");
         }
         v.to_string()
+    }
+
+    /// The main colours of a picture (seed for a custom palette).
+    pub fn extract_palette(&self, image: RgbaImage, colors: u32) -> Result<Vec<u32>, PbError> {
+        let img = crate::from_rgba(&image)?;
+        Ok(pixelart::extract_palette(&img, colors as usize).into_iter().map(hex).collect())
+    }
+}
+
+/// The user's own palettes (JSON in the app's documents).
+#[derive(uniffi::Object)]
+pub struct PaletteStore {
+    file: std::path::PathBuf,
+    list: std::sync::Mutex<Vec<PixelPalette>>,
+}
+
+#[uniffi::export]
+impl PaletteStore {
+    #[uniffi::constructor]
+    pub fn new(dir: String) -> std::sync::Arc<Self> {
+        let _ = std::fs::create_dir_all(&dir);
+        let file = std::path::Path::new(&dir).join("palettes.json");
+        let list: Vec<PixelPalette> = std::fs::read(&file).ok().and_then(|b| serde_json::from_slice::<Vec<(String, String, Vec<u32>)>>(&b).ok()).unwrap_or_default().into_iter().map(|(id, name, swatches)| PixelPalette { id, name, swatches, adaptive: false }).collect();
+        std::sync::Arc::new(PaletteStore { file, list: std::sync::Mutex::new(list) })
+    }
+
+    pub fn list(&self) -> Vec<PixelPalette> {
+        self.list.lock().unwrap().clone()
+    }
+
+    /// Create or update (same id) a palette; returns it.
+    pub fn save(&self, id: String, name: String, swatches: Vec<u32>) -> Result<PixelPalette, PbError> {
+        if swatches.len() < 2 {
+            return Err(PbError::from("a palette needs at least 2 colours".to_string()));
+        }
+        let id = if id.is_empty() { format!("custom:{}", pb_core::telemetry::new_run_id()) } else { id };
+        let p = PixelPalette { id: id.clone(), name: if name.trim().is_empty() { "My palette".into() } else { name.chars().take(40).collect() }, swatches: swatches.into_iter().take(256).collect(), adaptive: false };
+        let mut l = self.list.lock().unwrap();
+        match l.iter_mut().find(|x| x.id == id) {
+            Some(x) => *x = p.clone(),
+            None => l.push(p.clone()),
+        }
+        self.persist(&l)?;
+        pb_core::telemetry::event("pixelart", "palette_saved").metric("colours", p.swatches.len() as f64).emit();
+        Ok(p)
+    }
+
+    pub fn delete(&self, id: String) -> Result<(), PbError> {
+        let mut l = self.list.lock().unwrap();
+        l.retain(|x| x.id != id);
+        self.persist(&l)
+    }
+}
+
+impl PaletteStore {
+    fn persist(&self, l: &[PixelPalette]) -> Result<(), PbError> {
+        let v: Vec<(String, String, Vec<u32>)> = l.iter().map(|p| (p.id.clone(), p.name.clone(), p.swatches.clone())).collect();
+        let tmp = self.file.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_vec_pretty(&v).unwrap_or_default()).map_err(|e| PbError::from(e.to_string()))?;
+        std::fs::rename(&tmp, &self.file).map_err(|e| PbError::from(e.to_string()))
     }
 }
 

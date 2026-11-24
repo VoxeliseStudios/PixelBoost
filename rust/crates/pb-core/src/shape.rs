@@ -438,6 +438,45 @@ struct Band {
     start: f32,
     end: f32,
     ring: Ring,
+    /// Dashed / dotted: cumulative arc length of the band's centre line by
+    /// angle (ARC_N steps, 0..1) and its total length, so marks are evenly
+    /// spaced along the outline even where it has deep notches (flower,
+    /// heart, star) instead of evenly by angle.
+    arc: Option<(Vec<f32>, f32)>,
+}
+
+const ARC_N: usize = 1024;
+
+/// Arc-length table of the iso-line `d = level` seen from the box centre.
+fn arc_table(sdf: &Sdf, level: f32, max_r: f32) -> (Vec<f32>, f32) {
+    let pts: Vec<(f32, f32)> = (0..ARC_N)
+        .map(|i| {
+            // Same angle convention as the renderer: t = 0 points up.
+            let a = TAU * i as f32 / ARC_N as f32 - PI / 2.0;
+            let (dx, dy) = (a.cos(), a.sin());
+            // First crossing of `level` walking out from the centre.
+            let mut r = 0.0f32;
+            let mut prev = sdf.dist(0.0, 0.0) - level;
+            let step = (max_r / 2048.0).max(0.25);
+            while r < max_r {
+                let v = sdf.dist(dx * (r + step), dy * (r + step)) - level;
+                if prev < 0.0 && v >= 0.0 {
+                    r += step * (-prev / (v - prev).max(1e-6));
+                    break;
+                }
+                prev = v;
+                r += step;
+            }
+            (dx * r, dy * r)
+        })
+        .collect();
+    let mut cum = vec![0.0f32; ARC_N + 1];
+    for i in 0..ARC_N {
+        let (a, b) = (pts[i], pts[(i + 1) % ARC_N]);
+        cum[i + 1] = cum[i] + ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt();
+    }
+    let total = cum[ARC_N].max(1e-3);
+    (cum.into_iter().map(|c| c / total).collect(), total)
 }
 
 impl Band {
@@ -474,8 +513,15 @@ impl Band {
             }
             "dashed" | "dotted" => {
                 let n = r.count.max(3.0).round();
-                let seg = TAU * rad.max(1.0) / n;
-                let u = tt * n;
+                let (u, seg) = match &self.arc {
+                    Some((cum, total)) => {
+                        let x = t * ARC_N as f32;
+                        let i = (x as usize).min(ARC_N - 1);
+                        let s = cum[i] + (cum[i + 1] - cum[i]) * (x - i as f32);
+                        ((s + r.angle / 360.0).rem_euclid(1.0) * n, total / n)
+                    }
+                    None => (tt * n, TAU * rad.max(1.0) / n),
+                };
                 let f = u - u.floor();
                 if r.style == "dashed" {
                     let on = 0.62;
@@ -531,7 +577,8 @@ pub fn render(img: &Image, spec: &ShapeCrop) -> Result<Image, String> {
         let start = cur + r.gap * size;
         let end = start + (r.width.max(0.0) * size).max(1.0);
         cur = end;
-        bands.push(Band { start, end, ring: r.clone() });
+        let arc = matches!(r.style.as_str(), "dashed" | "dotted").then(|| arc_table(&sdf, (start + end) / 2.0, (w + h) * 2.0 + end));
+        bands.push(Band { start, end, ring: r.clone(), arc });
     }
     let reach = bands.iter().map(|b| b.reach()).fold(0.0f32, f32::max);
     let feather = (spec.feather.max(0.0) * size).max(0.0);

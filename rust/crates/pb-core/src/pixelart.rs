@@ -809,9 +809,37 @@ fn weighted_points(art: &Art) -> (Vec<Lab>, Vec<f32>) {
             }
         }
         pts.push(c);
-        wts.push(1.0 + 6.0 * m.min(0.3));
+        // Skin gets extra weight so faces keep a ramp of their own instead
+        // of sharing a colour with pale walls or sheets.
+        wts.push((1.0 + 6.0 * m.min(0.3)) * if is_skin(c) { 2.5 } else { 1.0 });
     }
     (pts, wts)
+}
+
+/// Skin tone in OKLab: warm hue (orange-red), moderate chroma, mid to
+/// light lightness.
+fn is_skin(c: Lab) -> bool {
+    let (l, a, b) = (c[0], c[1], c[2]);
+    let chroma = (a * a + b * b).sqrt();
+    let hue = b.atan2(a).to_degrees();
+    (0.45..0.93).contains(&l) && (0.025..0.16).contains(&chroma) && (20.0..80.0).contains(&hue)
+}
+
+/// The main colours of a picture (for seeding a custom palette).
+pub fn extract_palette(img: &Image, n: usize) -> Vec<[f32; 3]> {
+    if img.w == 0 || img.h == 0 {
+        return Vec::new();
+    }
+    let p = PixelArt { width: img.w.clamp(8, 160), ..PixelArt::default() };
+    let (cell, aw, ah) = grid(img.w, img.h, &p);
+    let art = sample_cells(img, cell, aw, ah, 0.0);
+    let (pts, wts) = weighted_points(&art);
+    if pts.is_empty() {
+        return Vec::new();
+    }
+    let mut c = kmeans(&pts, &wts, n.clamp(2, 64), [1.0, 1.0, 1.0], 14);
+    c.sort_by(|a, b| a[0].total_cmp(&b[0]));
+    c.into_iter().map(oklab_to_srgb).collect()
 }
 
 /// Weighted k-means++ (deterministic seeding) in scaled OKLab.
@@ -1338,6 +1366,57 @@ fn rim_light(idx: &mut [u16], alpha: &[bool], lab: &[Lab], pal: &[Lab], w: usize
 // ------------------------------------------------------------------ sparkles
 
 /// Bright points worth a star: (strength, art pixel), spaced apart.
+/// Is the bright spot in art cell `i` star-like in the source: tiny,
+/// round and on its own (not a streak of specular highlight on a glossy
+/// surface, which is elongated or bigger)?
+fn star_shaped(img: &Image, cell: usize, aw: usize, i: usize) -> bool {
+    let (cx, cy) = ((i % aw) * cell + cell / 2, (i / aw) * cell + cell / 2);
+    let r = (cell * 3 / 2).max(3);
+    let (x0, y0) = (cx.saturating_sub(r), cy.saturating_sub(r));
+    let (x1, y1) = ((cx + r + 1).min(img.w), (cy + r + 1).min(img.h));
+    if x1 <= x0 + 2 || y1 <= y0 + 2 {
+        return true;
+    }
+    let mut mx = 0.0f32;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            mx = mx.max(Image::luma(img.px[y * img.w + x]));
+        }
+    }
+    let t = mx - 0.12;
+    let (mut n, mut sx, mut sy, mut sxx, mut syy, mut sxy) = (0.0f32, 0.0f32, 0.0f32, 0.0f32, 0.0f32, 0.0f32);
+    let mut touches = false;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            if Image::luma(img.px[y * img.w + x]) >= t {
+                let (fx, fy) = (x as f32, y as f32);
+                n += 1.0;
+                sx += fx;
+                sy += fy;
+                sxx += fx * fx;
+                syy += fy * fy;
+                sxy += fx * fy;
+                if x == x0 || y == y0 || x + 1 == x1 || y + 1 == y1 {
+                    touches = true;
+                }
+            }
+        }
+    }
+    if n < 1.0 {
+        return false;
+    }
+    let (mx_, my) = (sx / n, sy / n);
+    let (vx, vy, cxy) = (sxx / n - mx_ * mx_, syy / n - my * my, sxy / n - mx_ * my);
+    let tr = vx + vy;
+    let det = vx * vy - cxy * cxy;
+    let disc = (tr * tr / 4.0 - det).max(0.0).sqrt();
+    let (l1, l2) = (tr / 2.0 + disc, (tr / 2.0 - disc).max(0.05));
+    let elong = (l1 / l2).sqrt();
+    let win = ((x1 - x0) * (y1 - y0)) as f32;
+    // Small (under ~6% of the window), not elongated, not running out of it.
+    !touches && n <= (win * 0.06).max(4.0) && elong < 2.6
+}
+
 fn sparkle_points(art: &Art, amount: f32) -> Vec<(f32, usize)> {
     if amount <= 0.01 {
         return Vec::new();
@@ -1524,6 +1603,8 @@ fn report(p: &PixelArt, aw: usize, ah: usize, cell: usize, pal: &[Lab], idx: &[u
         .metric("ms_sample", t_sample)
         .metric("ms_palette", t_palette)
         .metric("src_mp", src_px as f64 / 1e6)
+        .metric("custom_colours", p.custom.len() as f64)
+        .metric("skin_colours", pal.iter().filter(|c| is_skin(**c)).count() as f64)
         .emit();
 }
 
@@ -1538,7 +1619,11 @@ pub fn render(img: &Image, p: &PixelArt) -> Result<Image, String> {
     abstract_pass(&mut art, p.smooth.clamp(0.0, 1.0));
     look(&mut art, p.punch, p.hue_shift);
     let t_sample = t0.elapsed().as_secs_f64() * 1000.0;
-    let stars = sparkle_points(&art, p.sparkle.clamp(0.0, 1.0));
+    let mut stars = sparkle_points(&art, p.sparkle.clamp(0.0, 1.0));
+    // Shape test on the source: drop glossy streaks posing as stars.
+    let before = stars.len();
+    stars.retain(|(_, i)| star_shaped(img, cell, aw, *i));
+    let rejected = before - stars.len();
     let mut pal = build_palette(&art, p);
     if p.custom.is_empty() && palette_by_id(&p.palette).is_none() {
         pal.extend(star_colors(&art, &stars));
@@ -1566,6 +1651,9 @@ pub fn render(img: &Image, p: &PixelArt) -> Result<Image, String> {
     let line_px = idx.iter().zip(&before_lines).filter(|(a, b)| a != b).count();
     sparkles(&mut idx, &alpha, &art, &pal, p.sparkle.clamp(0.0, 1.0), &stars);
     report(p, aw, ah, cell, &pal, &idx, &dz, line_px, stars.len(), t_sample, t_palette, t0.elapsed().as_secs_f64() * 1000.0, img.w * img.h);
+    if rejected > 0 {
+        crate::telemetry::event("pixelart", "stars_rejected").metric("n", rejected as f64).metric("kept", stars.len() as f64).emit();
+    }
 
     let rgb: Vec<[f32; 3]> = pal.iter().map(|c| oklab_to_srgb(*c)).collect();
     let small: Vec<[f32; 4]> = idx

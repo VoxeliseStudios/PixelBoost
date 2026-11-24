@@ -1,6 +1,7 @@
 //! pb-core — the PixelBoost engine.
 
 pub mod analyze;
+pub mod animate;
 pub mod classify;
 pub mod compose;
 pub mod dehalo;
@@ -13,6 +14,7 @@ pub mod fidelity;
 pub mod filters;
 pub mod fusion;
 pub mod fx;
+pub mod heal;
 pub mod image;
 pub mod mask;
 pub mod meta;

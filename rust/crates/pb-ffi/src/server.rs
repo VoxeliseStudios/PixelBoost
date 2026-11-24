@@ -320,14 +320,6 @@ impl ServerClient {
 
 /// Plain helpers for other pb-ffi modules (telemetry, model downloads).
 impl ServerClient {
-    pub(crate) fn device_id(&self) -> String {
-        self.cfg.lock().unwrap().device.clone()
-    }
-
-    pub(crate) fn base_url(&self) -> String {
-        self.cfg.lock().unwrap().base.clone()
-    }
-
     pub(crate) fn post_json_now(&self, path: &str, body: &Value) -> Result<Value, PbError> {
         let c = self.cfg.lock().unwrap().clone();
         if c.base.is_empty() {

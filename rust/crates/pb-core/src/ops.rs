@@ -35,6 +35,9 @@ pub enum Op {
     DepthFog { path: String, color: [f32; 3], density: f32, #[serde(default)] start: f32 },
     /// Fill the white area of the mask image.
     Inpaint { mask: String },
+    /// Healing brush: rebuild texture in the mask from the surroundings
+    /// (PatchMatch completion, see `heal`).
+    Heal { mask: String },
     /// Normalised coordinates (0..1); `radius` is a fraction of the width.
     CloneStamp { sx: f32, sy: f32, dx: f32, dy: f32, radius: f32, #[serde(default = "half")] hardness: f32 },
     /// Apply `ops` only where the mask is white.
@@ -208,6 +211,7 @@ impl Op {
             | Op::AoBlend { .. }
             | Op::DepthFog { .. }
             | Op::Inpaint { .. }
+            | Op::Heal { .. }
             | Op::Masked { .. }
             | Op::Background { .. }
             | Op::BlurredBackground { .. }
@@ -344,6 +348,19 @@ fn apply_inner(img: &Image, op: &Op) -> Result<Image, String> {
         Op::AoBlend { path, amount } => edit::ao_blend(&mut out, &Image::open(path)?, *amount),
         Op::DepthFog { path, color, density, start } => edit::depth_fog(&mut out, &Image::open(path)?, *color, *density, *start),
         Op::Inpaint { mask } => out = edit::inpaint(img, &load_mask(mask, img.w, img.h)?),
+        Op::Heal { mask } => {
+            let t0 = std::time::Instant::now();
+            let (o, r) = crate::heal::heal(img, &load_mask(mask, img.w, img.h)?);
+            crate::telemetry::event("heal", "fill")
+                .since(t0)
+                .metric("hole_px", r.hole_px as f64)
+                .metric("hole_share", r.hole_px as f64 / (img.w * img.h).max(1) as f64)
+                .metric("levels", r.levels as f64)
+                .metric("window_mp", (r.window.0 * r.window.1) as f64 / 1e6)
+                .metric("patch_error", r.patch_error)
+                .emit();
+            out = o
+        }
         Op::CloneStamp { sx, sy, dx, dy, radius, hardness } => {
             let (w, h) = (img.w as f32, img.h as f32);
             edit::clone_stamp(&mut out, sx * w, sy * h, dx * w, dy * h, radius * w, *hardness)

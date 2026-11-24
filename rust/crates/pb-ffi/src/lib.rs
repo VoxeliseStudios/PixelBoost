@@ -15,12 +15,14 @@ use std::sync::{Arc, Mutex};
 
 pub mod editor;
 pub mod history;
+pub mod animation;
 pub mod cutout;
 pub mod downloads;
 pub mod pixel;
 pub mod server;
 pub mod smart;
 pub mod telemetry;
+pub mod workflows;
 
 uniffi::setup_scaffolding!();
 
@@ -193,7 +195,7 @@ fn fmt_for(path: &str) -> Format {
     Format::from_path(path)
 }
 
-fn to_rgba(img: &Image) -> RgbaImage {
+pub(crate) fn to_rgba(img: &Image) -> RgbaImage {
     RgbaImage { width: img.w as u32, height: img.h as u32, rgba: img.to_rgba8() }
 }
 
@@ -325,15 +327,10 @@ impl PixelBoostCore {
 }
 
 impl PixelBoostCore {
-    fn upscale_inner(&self, run: &str, input_path: String, output_path: String, settings: UpscaleSettings, listener: Arc<dyn UpscaleListener>, cancel: Arc<CancelToken>) -> Result<UpscaleOutcome, PbError> {
-        let asked = settings.clone();
-        // Anything still on Auto is decided from the photo (with a default
-        // phone budget; the app resolves with its learned speed first).
-        let settings = if smart::has_auto(&settings) { self.resolve(input_path.clone(), settings, 40.0, 180.0, false)?.settings } else { settings };
-        let t_load = std::time::Instant::now();
-        let img = Image::open(&input_path)?;
-        let load_ms = t_load.elapsed().as_secs_f64() * 1000.0;
-        let fp = if pb_core::telemetry::enabled() { pb_core::telemetry::fingerprint(&img) } else { String::new() };
+    /// Networks (from the warm cache), pipeline settings and limits for
+    /// resolved `settings`.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn prepare(&self, settings: &UpscaleSettings) -> Result<(String, pb_core::fusion::Stack, Settings, pb_core::stream::Limits, f32, Fidelity), PbError> {
         // An optional model that isn't downloaded: the photo network does
         // the same job (with a resample to the asked size).
         let model = if pb_core::model_available(&self.models_dir, &settings.model) { settings.model.clone() } else { "photo".to_string() };
@@ -372,6 +369,19 @@ impl PixelBoostCore {
             dehalo: settings.dehalo.clamp(0.0, 1.0),
         };
         let lim = pb_core::stream::Limits { max_output_px: if settings.max_output_mp > 0.0 { (settings.max_output_mp as f64 * 1e6) as usize } else { 120_000_000 } };
+        Ok((model, stack, st, lim, realism, fidelity))
+    }
+
+    fn upscale_inner(&self, run: &str, input_path: String, output_path: String, settings: UpscaleSettings, listener: Arc<dyn UpscaleListener>, cancel: Arc<CancelToken>) -> Result<UpscaleOutcome, PbError> {
+        let asked = settings.clone();
+        // Anything still on Auto is decided from the photo (with a default
+        // phone budget; the app resolves with its learned speed first).
+        let settings = if smart::has_auto(&settings) { self.resolve(input_path.clone(), settings, 40.0, 180.0, false)?.settings } else { settings };
+        let t_load = std::time::Instant::now();
+        let img = Image::open(&input_path)?;
+        let load_ms = t_load.elapsed().as_secs_f64() * 1000.0;
+        let fp = if pb_core::telemetry::enabled() { pb_core::telemetry::fingerprint(&img) } else { String::new() };
+        let (model, stack, st, lim, realism, fidelity) = self.prepare(&settings)?;
         let res = pb_core::stream::upscale(&stack, &img, &st, lim, &mut |e| {
             let [x, y, w, h] = e.rect;
             let rgba = if w > 0 { e.pixels.data.clone() } else { Vec::new() };
