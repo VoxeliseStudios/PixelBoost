@@ -229,6 +229,9 @@ and a worker restart lost one user's 5 queued jobs. Every on-device run
       `DownloadListener`, analyze/resolve `cloud` argument, CLI `--cloud`.
 - [x] App: Cloud tab → Library (on-device history + Batch), upscale sheet
       without the This iPhone / Cloud choice, cloud BG refresh task gone.
+- [x] Released as v5.8.0 (2026-11-24): app + Share + Widgets ad-hoc signed
+      with the App Group; release and AltStore source byte-identical
+      (sha256 27a2ced8...); repo back to private.
 
 , 256px GT crop -> 64px -> 4x)
 
