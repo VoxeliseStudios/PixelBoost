@@ -20,6 +20,24 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+const INFLIGHT_FILE: &str = "inflight.json";
+static INFLIGHT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Marks a run as in progress (numbers become metrics, strings tags of the
+/// `upscale/killed` event the next launch sends if it never finished).
+pub(crate) fn inflight_begin(v: &Value) {
+    if let Some(p) = INFLIGHT.get() {
+        let _ = std::fs::write(p, v.to_string());
+    }
+}
+
+/// The run ended (any outcome).
+pub(crate) fn inflight_end() {
+    if let Some(p) = INFLIGHT.get() {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
 /// Queue file larger than this drops its oldest half (offline for weeks).
 const MAX_QUEUE_BYTES: u64 = 6 << 20;
 const BATCH: usize = 400;
@@ -104,6 +122,27 @@ impl Telemetry {
             tm::set_sink(Some(q));
         }
         tm::event("app", "session").tag("kernel", pb_nn::conv::kernel_name()).emit();
+        let marker = t.q.dir.join(INFLIGHT_FILE);
+        let _ = INFLIGHT.set(marker.clone());
+        // A run that was still going when the process died: iOS killed it
+        // (memory, most likely) or it crashed. Report what it was doing.
+        if let Ok(b) = std::fs::read(&marker) {
+            if enabled {
+                if let Ok(Value::Object(m)) = serde_json::from_slice::<Value>(&b) {
+                    let run = m.get("run").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let mut e = tm::event("upscale", "killed").run(&run);
+                    for (k, v) in &m {
+                        match v {
+                            Value::Number(n) => e = e.metric(k, n.as_f64().unwrap_or(0.0)),
+                            Value::String(s) if k != "run" => e = e.tag(k, s),
+                            _ => {}
+                        }
+                    }
+                    e.emit();
+                }
+            }
+            let _ = std::fs::remove_file(&marker);
+        }
         t
     }
 
@@ -222,7 +261,8 @@ impl Telemetry {
     /// "bad_cutout", ...). Returns the sample id.
     pub fn send_sample(&self, server: Arc<ServerClient>, run: String, reason: String, source_path: String, result_path: String, note: String) -> Result<String, PbError> {
         let src = Image::open(&source_path)?;
-        let res = Image::open(&result_path)?;
+        // 8-bit (4 B/px) instead of f32: results can be 100+ MP.
+        let res = pb_core::strips::open_rgba8(&result_path)?;
         let (sc, rc) = sample_crops(&src, &res);
         let sj = sc.encode(pb_core::image::Format::Jpeg, 90)?;
         let rj = rc.encode(pb_core::image::Format::Jpeg, 90)?;
@@ -258,7 +298,8 @@ fn trim(p: &std::path::Path) {
 
 /// Matching crops: the 256 px source window with the most fine detail and
 /// the same area of the result (scaled), result crop capped at 1024 px.
-pub(crate) fn sample_crops(src: &Image, res: &Image) -> (Image, Image) {
+pub(crate) fn sample_crops(src: &Image, res: &dyn pb_core::stream::Source) -> (Image, Image) {
+    let (res_w, res_h) = res.size();
     let n = 256usize.min(src.w).min(src.h).max(1);
     let (mut best, mut bx, mut by) = (-1.0f32, 0usize, 0usize);
     let step = (n / 2).max(1);
@@ -280,11 +321,11 @@ pub(crate) fn sample_crops(src: &Image, res: &Image) -> (Image, Image) {
         y += step;
     }
     let sc = src.crop(bx, by, n, n);
-    let fx = res.w as f32 / src.w.max(1) as f32;
-    let fy = res.h as f32 / src.h.max(1) as f32;
+    let fx = res_w as f32 / src.w.max(1) as f32;
+    let fy = res_h as f32 / src.h.max(1) as f32;
     let (rx, ry) = ((bx as f32 * fx) as usize, (by as f32 * fy) as usize);
-    let (rw, rh) = (((n as f32 * fx) as usize).min(res.w - rx.min(res.w)).max(1), ((n as f32 * fy) as usize).min(res.h - ry.min(res.h)).max(1));
-    let mut rc = res.crop(rx.min(res.w - 1), ry.min(res.h - 1), rw, rh);
+    let (rw, rh) = (((n as f32 * fx) as usize).min(res_w - rx.min(res_w)).max(1), ((n as f32 * fy) as usize).min(res_h - ry.min(res_h)).max(1));
+    let mut rc = res.region(rx.min(res_w - 1), ry.min(res_h - 1), rw, rh);
     if rc.w > 1024 {
         let h = (rc.h * 1024 / rc.w).max(1);
         rc = pb_core::resample::resize(&rc, 1024, h, pb_core::resample::Filter::Lanczos3);

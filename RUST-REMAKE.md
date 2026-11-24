@@ -233,6 +233,22 @@ and a worker restart lost one user's 5 queued jobs. Every on-device run
       with the App Group; release and AltStore source byte-identical
       (sha256 27a2ced8...); repo back to private.
 
+## 5.8.1 — out-of-memory crash on 4 GB iPhones (2026-11-24)
+
+Telemetry: on an iPhone 13 (iPhone14,5, ~3.6 GB) the app restarted right
+after starting 4096² upscales at 2x-4x, with no run event (iOS kills
+without a trace). Cause: a fixed 120 MP output cap on every device, a
+needless full f32 copy of the input, and two f32 decodes of the result
+afterwards (preview + Library thumbnail, 1.9 GB each at 120 MP).
+
+- [x] Output cap from free memory (`pb_core::memory`, iOS
+      `os_proc_available_memory`), also applied to Smart settings.
+- [x] Streaming previews / thumbnails / header-only image info; no input
+      clone without alpha; 8-bit result for "Send this example".
+- [x] Telemetry: `avail_mb`, `est_peak_mb`, `mem_capped` on runs; runs that
+      never finished come back as `upscale/killed` on next launch.
+- Details and follow-ups: rust/TODO.md 5.8.1.
+
 , 256px GT crop -> 64px -> 4x)
 
 Final settings (`pixelboost eval testimages/src OUT --crop 256`):

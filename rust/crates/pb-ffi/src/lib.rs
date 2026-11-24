@@ -290,8 +290,9 @@ impl PixelBoostCore {
     }
 
     pub fn image_info(&self, path: String) -> Result<ImageInfo, PbError> {
-        let img = Image::open(&path)?;
-        Ok(ImageInfo { width: img.w as u32, height: img.h as u32, has_alpha: img.has_alpha(), path })
+        // Header + (only with an alpha channel) an 8-bit row scan: no f32 copy.
+        let (w, h, has_alpha) = pb_core::memory::info(&path)?;
+        Ok(ImageInfo { width: w as u32, height: h as u32, has_alpha, path })
     }
 
     /// Output size, tile count and compute cost before running.
@@ -314,6 +315,7 @@ impl PixelBoostCore {
         let run = pb_core::telemetry::new_run_id();
         let t0 = std::time::Instant::now();
         let r = pb_core::telemetry::scope(&run, || self.upscale_inner(&run, input_path, output_path, settings.clone(), listener, cancel));
+        telemetry::inflight_end();
         if let Err(e) = &r {
             let (outcome, msg) = match e {
                 PbError::Cancelled => ("cancelled", String::new()),
@@ -377,11 +379,25 @@ impl PixelBoostCore {
         // Anything still on Auto is decided from the photo (with a default
         // phone budget; the app resolves with its learned speed first).
         let settings = if smart::has_auto(&settings) { self.resolve(input_path.clone(), settings, 40.0, 180.0)?.settings } else { settings };
+        let (model, stack, st, lim, realism, fidelity) = self.prepare(&settings)?;
+        // Output cap from the memory this process may still use, measured
+        // before the input is decoded so the estimate covers it too. iOS
+        // kills the app without a word past its limit (~2 GB on 4 GB phones).
+        let (hw, hh, halpha) = pb_core::memory::header(&input_path)?;
+        let job = pb_core::memory::UpscaleMem { in_w: hw, in_h: hh, scale: st.scale, prescale: st.prescale, net_scale: Upscaler::scale(&stack), alpha: halpha, dehalo: st.dehalo > 0.0 };
+        let (cap_px, avail_mb) = pb_core::memory::output_cap(&job, lim.max_output_px);
+        let mem_capped = cap_px < lim.max_output_px;
+        let lim = pb_core::stream::Limits { max_output_px: cap_px };
+        telemetry::inflight_begin(&serde_json::json!({
+            "run": run, "model": model, "backend": stack.backend(),
+            "in_w": hw, "in_h": hh, "scale": st.scale, "prescale": st.prescale, "ensemble": st.ensemble, "tile": st.tile,
+            "avail_mb": avail_mb, "est_peak_mb": job.peak_mb(job.out_px().min(cap_px as f64)), "cap_mp": cap_px as f64 / 1e6,
+            "mem_mb": pb_core::telemetry::memory_mb().0,
+        }));
         let t_load = std::time::Instant::now();
         let img = Image::open(&input_path)?;
         let load_ms = t_load.elapsed().as_secs_f64() * 1000.0;
         let fp = if pb_core::telemetry::enabled() { pb_core::telemetry::fingerprint(&img) } else { String::new() };
-        let (model, stack, st, lim, realism, fidelity) = self.prepare(&settings)?;
         let res = pb_core::stream::upscale(&stack, &img, &st, lim, &mut |e| {
             let [x, y, w, h] = e.rect;
             let rgba = if w > 0 { e.pixels.data.clone() } else { Vec::new() };
@@ -425,6 +441,9 @@ impl PixelBoostCore {
             .metric("tiles", rep.tiles as f64)
             .metric("fidelity_db", rep.fidelity_db)
             .flag("capped", capped)
+            .flag("mem_capped", mem_capped && capped)
+            .metric("avail_mb", avail_mb)
+            .metric("est_peak_mb", job.peak_mb((out.w * out.h) as f64))
             .flag("alpha", rep.had_alpha)
             .metric("gflop", Upscaler::macs_per_px(&stack) * 2.0 * (in_w * in_h) as f64 * st.prescale.powi(2) as f64 * rep.passes.max(1) as f64 / 1e9)
             .metric("net_ms", rep.net_ms)
@@ -514,11 +533,9 @@ impl PixelBoostCore {
 
     /// Decode any supported file to RGBA8, shrunk to fit `max_side`.
     pub fn load_preview(&self, path: String, max_side: u32) -> Result<RgbaImage, PbError> {
-        let img = Image::open(&path)?;
-        let m = max_side.max(16) as usize;
-        let f = m as f32 / img.w.max(img.h) as f32;
-        let img = if f < 1.0 { pb_core::resample::resize(&img, ((img.w as f32 * f).round() as usize).max(1), ((img.h as f32 * f).round() as usize).max(1), pb_core::resample::Filter::Lanczos3) } else { img };
-        Ok(to_rgba(&img))
+        // Streams big results row by row (a full f32 decode of a 120 MP
+        // result was 1.9 GB).
+        Ok(to_rgba(&pb_core::memory::open_preview(&path, max_side as usize)?))
     }
 
     pub fn save_rgba(&self, image: RgbaImage, path: String, quality: u8) -> Result<(), PbError> {

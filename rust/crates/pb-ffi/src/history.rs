@@ -3,8 +3,6 @@
 
 use crate::PbError;
 use pb_core::image::Format;
-use pb_core::resample::{resize, Filter};
-use pb_core::Image;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -65,9 +63,7 @@ impl HistoryStore {
         let ext = std::path::Path::new(&result_file).extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_else(|| "png".into());
         let dest = self.dir.join(format!("{}.{ext}", entry.id));
         std::fs::copy(&result_file, &dest).map_err(|e| PbError::Failed { message: e.to_string() })?;
-        let img = Image::open(&result_file)?;
-        let f = 320.0 / img.w.max(img.h) as f32;
-        let t = if f < 1.0 { resize(&img, ((img.w as f32 * f) as usize).max(1), ((img.h as f32 * f) as usize).max(1), Filter::Lanczos3) } else { img };
+        let t = pb_core::memory::open_preview(&result_file, 320)?;
         let thumb = self.dir.join(format!("{}_t.jpg", entry.id));
         std::fs::write(&thumb, t.encode(Format::Jpeg, 85)?).map_err(|e| PbError::Failed { message: e.to_string() })?;
         entry.result_path = dest.to_string_lossy().into();

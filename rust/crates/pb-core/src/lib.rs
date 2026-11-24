@@ -18,6 +18,7 @@ pub mod heal;
 pub mod image;
 pub mod mask;
 pub mod meta;
+pub mod memory;
 pub mod metrics;
 pub mod models;
 pub mod ops;

@@ -137,7 +137,8 @@ pub struct StreamEvent<'a> {
     pub done: usize,
     pub total: usize,
     /// Output pixels written: x, y, w, h (in final-output coordinates; for
-    /// the first of two passes, scaled to them).
+    /// the first of two passes, scaled to them; when the size was capped,
+    /// in the coordinates of the size that was asked for).
     pub rect: [usize; 4],
     pub pixels: &'a Rgba8,
 }
@@ -511,7 +512,12 @@ pub fn upscale(engine: &dyn Upscaler, img: &Image, st: &Settings, lim: Limits, p
     }
     let (tw, th) = (((img.w as f64) * target).round().max(1.0) as usize, ((img.h as f64) * target).round().max(1.0) as usize);
     let s = engine.scale();
-    let rgb = if had_alpha { bleed_transparent(img) } else { img.clone() };
+    // Only transparent pictures need a modified copy; the rest is read in
+    // place (a full f32 copy of a 4096² input is 268 MB).
+    let rgb: std::borrow::Cow<'_, Image> = if had_alpha { std::borrow::Cow::Owned(bleed_transparent(img)) } else { std::borrow::Cow::Borrowed(img) };
+    // Progress rects stay in the requested output's coordinates when the
+    // size was capped (the app's live preview is laid out for that size).
+    let rs = if capped { (px.sqrt() * st.scale.clamp(1.0, 64.0) as f64 / (tw as f64 * th as f64).sqrt()) as f32 } else { 1.0 };
     let two = target > s as f64 * 1.5;
     let tiles = |w: usize, h: usize| w.div_ceil(st.tile.clamp(32, 512)) * h.div_ceil(st.tile.clamp(32, 512));
     let total = tiles(img.w, img.h) + if two { tiles(img.w * s, img.h * s) } else { 0 };
@@ -521,16 +527,16 @@ pub fn upscale(engine: &dyn Upscaler, img: &Image, st: &Settings, lim: Limits, p
     let mut out = Rgba8::new(tw, th);
     if two {
         let mut mid = Rgba8::new(img.w * s, img.h * s);
-        let vs = tw as f32 / mid.w as f32;
-        if !run_pass(engine, &rgb, st, PassOut { out: &mut mid, view_scale: vs }, &mut done, total, &mut se, &mut tm, progress) {
+        let vs = tw as f32 / mid.w as f32 * rs;
+        if !run_pass(engine, &*rgb, st, PassOut { out: &mut mid, view_scale: vs }, &mut done, total, &mut se, &mut tm, progress) {
             return None;
         }
         drop(rgb);
         let mut none = None;
-        if !run_pass(engine, &mid, st, PassOut { out: &mut out, view_scale: 1.0 }, &mut done, total, &mut none, &mut tm, progress) {
+        if !run_pass(engine, &mid, st, PassOut { out: &mut out, view_scale: rs }, &mut done, total, &mut none, &mut tm, progress) {
             return None;
         }
-    } else if !run_pass(engine, &rgb, st, PassOut { out: &mut out, view_scale: 1.0 }, &mut done, total, &mut se, &mut tm, progress) {
+    } else if !run_pass(engine, &*rgb, st, PassOut { out: &mut out, view_scale: rs }, &mut done, total, &mut se, &mut tm, progress) {
         return None;
     }
     if had_alpha {

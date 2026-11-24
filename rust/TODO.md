@@ -249,3 +249,35 @@ Overall tracker: ../RUST-REMAKE.md
 - [ ] Pre-existing clippy lints with the newer toolchain (is_multiple_of,
       as_chunks, needless_range_loop) — style only.
 
+
+## 5.8.1 (2026-11-24): out-of-memory crash on 4 GB iPhones
+
+Telemetry: iPhone14,5 (iPhone 13, ~3.6 GB) sessions restarted right after
+starting 4096² upscales at 2x/3x/4x (no `upscale/run` event: iOS jetsam
+kills without a trace). The cap was a fixed 120 MP on every device; a
+120 MP run is ~0.9 GB of buffers here and 1.4-2.4 GB in the app, and the
+app then decoded the result as f32 twice (preview + history thumbnail,
+16 B/px = 1.9 GB at 120 MP).
+
+- [x] `pb_core::memory`: `available_mb()` (iOS `os_proc_available_memory`,
+      Linux MemAvailable, `PB_AVAILABLE_MB` override), `UpscaleMem` peak
+      estimate (f32 input 16 B/px, prescale/alpha/dehalo copies, two-pass
+      mid buffer, 8-bit output 4 B/px, 160 MB fixed), `output_cap()` =
+      50% of what is free. Used by every app upscale and by Smart
+      (analyze/resolve) so it never suggests a size the phone can't hold.
+- [x] `open_preview` streams PNG rows into a box grid (results are PNG):
+      `load_preview`, history thumbnails. `info` reads the header (+ an
+      8-bit alpha scan only with an alpha channel) for `image_info`.
+      "Send this example" reads the result as 8-bit.
+- [x] `stream::upscale` no longer clones the input when there is no alpha
+      (-268 MB on 4096²); capped runs report tile rects in the requested
+      size so the live preview fills correctly.
+- [x] Telemetry: `upscale/run` carries `avail_mb`, `est_peak_mb`,
+      `mem_capped`; an in-flight marker (Caches/telemetry/inflight.json)
+      turns a run that never finished into `upscale/killed` on next launch.
+- [x] `tests/lowmem_e2e.rs` (ignored, slow): 4096² x4 with 1700 MB free
+      through upscale + preview + history; peak checked.
+- [ ] Check `upscale/killed` and `mem_capped` in telemetry after 5.8.1 ships;
+      tune `BUDGET_SHARE` / `FIXED_MB` from `est_peak_mb` vs `mem_peak_mb`.
+- [ ] Editor on huge results (Edit after a 100+ MP upscale) still holds
+      f32 for non-strip ops (see 5.2 note): same memory cap idea applies.

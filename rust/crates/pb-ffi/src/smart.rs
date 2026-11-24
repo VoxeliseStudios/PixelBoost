@@ -57,7 +57,8 @@ impl PixelBoostCore {
     /// user accepts on the phone.
     pub fn analyze(&self, input_path: String, device_gflops: f32, max_seconds: f32, max_output_mp: f32) -> Result<PhotoAnalysis, PbError> {
         let m = analyze::measure_file(&input_path)?;
-        Ok(analysis(&m, budget(device_gflops, max_seconds, max_output_mp), &analyze::Fixed::default(), max_output_mp))
+        let mo = memory_mp(&m, max_output_mp, 1.0);
+        Ok(analysis(&m, budget(device_gflops, max_seconds, mo), &analyze::Fixed::default(), mo))
     }
 
     /// Fill in every setting left on Auto (model "auto", scale <= 0,
@@ -66,7 +67,7 @@ impl PixelBoostCore {
     /// real resolution, drawn vs photo, noise, JPEG blocks, softness, skin.
     pub fn resolve(&self, input_path: String, settings: UpscaleSettings, device_gflops: f32, max_seconds: f32) -> Result<PhotoAnalysis, PbError> {
         let m = analyze::measure_file(&input_path)?;
-        let mo = if settings.max_output_mp > 0.0 { settings.max_output_mp } else { 120.0 };
+        let mo = memory_mp(&m, if settings.max_output_mp > 0.0 { settings.max_output_mp } else { 120.0 }, settings.prescale);
         let mut a = analysis(&m, budget(device_gflops, max_seconds, mo), &fixed_of(&settings), mo);
         a.settings.tile = settings.tile.max(32);
         Ok(a)
@@ -109,6 +110,16 @@ impl PixelBoostCore {
         let pts = shape::outline(&shape, width.max(4.0), height.max(4.0), rotation, param, offset, points as usize)?;
         Ok(pts.into_iter().flatten().collect())
     }
+}
+
+/// The output cap (MP) lowered to what this device's free memory allows for
+/// this photo, so Smart never picks a size the phone can't hold.
+fn memory_mp(m: &analyze::Measures, max_output_mp: f32, prescale: f32) -> f32 {
+    let asked = if max_output_mp > 0.0 { max_output_mp } else { 120.0 };
+    // Single-pass estimate; the run itself re-checks with the real scale.
+    let job = pb_core::memory::UpscaleMem { in_w: m.width, in_h: m.height, scale: 4.0, prescale: if prescale > 0.0 { prescale } else { 1.0 }, net_scale: 4, alpha: m.has_alpha, dehalo: false };
+    let (cap, _) = pb_core::memory::output_cap(&job, (asked as f64 * 1e6) as usize);
+    (cap as f64 / 1e6) as f32
 }
 
 fn budget(gflops: f32, max_seconds: f32, max_output_mp: f32) -> Budget {
