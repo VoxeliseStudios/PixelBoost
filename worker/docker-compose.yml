@@ -24,6 +24,8 @@ services:
       # a game runs (gamemode hooks touch /jobs/.gaming).
       - PB_BACKEND=auto
       - PB_GPU_TUNE=/jobs/.gpu-tune.json
+      # Mesa's shader cache needs a writable home.
+      - XDG_CACHE_HOME=/jobs/.cache
     devices:
       - /dev/dri/renderD128:/dev/dri/renderD128
     group_add:

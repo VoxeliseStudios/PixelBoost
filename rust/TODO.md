@@ -221,6 +221,13 @@ Overall tracker: ../RUST-REMAKE.md
          (`PaletteStore`, settings `custom`); shape rings: dashes / dots
          spaced by arc length.
 
+- [x] Released as v5.7.0 (2026-11-24): CI build passed first try (Xcode
+      26.6); IPA 48.5 MB (was ~111 MB of models alone), app + Share +
+      Widgets signed with the App Group, verified from the release and from
+      the AltStore source (identical sha256 fbda5094...). Bridge deployed on
+      Mel (telemetry + /models/file), worker rebuilt with GPU support;
+      repo back to private.
+
 ### Still open after 5.7
 - [ ] Verify on device: f16 Metal speed, BGContinuedProcessingTask (GPU
       grant), video pump memory on 4K, cutout speed of IS-Net on A-series.
