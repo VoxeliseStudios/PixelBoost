@@ -13,6 +13,11 @@ struct StudioView: View {
     @State private var resultPreview: UIImage?
     @State private var smartSummary: String?
     @State private var lastScale: Float = 4
+    @State private var background: BackgroundRun?
+    @State private var showCompare = false
+    @State private var rated: Bool?
+    @State private var loupeAt: CGPoint?
+    @State private var exampleNote = ""
     let choice = UpscaleChoice()
 
     var body: some View {
@@ -30,10 +35,21 @@ struct StudioView: View {
                 .presentationDetents([.large])
                 .presentationBackground(Theme.ink)
         }
+        .sheet(isPresented: $showCompare) {
+            if let url = app.current {
+                CompareSheet(source: url, scale: lastScale)
+                    .presentationBackground(Theme.ink)
+            }
+        }
         .onChange(of: app.current) { _, _ in
+            if job.state == .done, let o = job.outcome, rated == nil { Feedback.discarded(o.runId) }
             job.reset()
             resultPreview = nil
             comparing = false
+            rated = nil
+        }
+        .onChange(of: job.done) { _, d in
+            background?.update(job.progress, subtitle: app.frames > 1 ? "Frame \(d) of \(job.total)" : "Tile \(d) of \(job.total)")
         }
         .task(id: "\(app.current?.path ?? "")|\(choice.smart)|\(choice.whereTo)|\(choice.maxWait)") {
             smartSummary = nil
@@ -49,6 +65,18 @@ struct StudioView: View {
             } else if let img = job.canvas ?? app.preview {
                 Image(uiImage: img).resizable().interpolation(.high).scaledToFit()
                     .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .overlay {
+                        GeometryReader { g in
+                            Color.clear.contentShape(Rectangle())
+                                .gesture(DragGesture(minimumDistance: 0).onChanged { v in
+                                    loupeAt = CGPoint(x: v.location.x / max(g.size.width, 1), y: v.location.y / max(g.size.height, 1))
+                                }.onEnded { _ in loupeAt = nil }, including: job.state == .done ? .all : .none)
+                            if let p = loupeAt, let o = job.outcome {
+                                PixelLoupe(path: o.outputPath, width: Int(o.width), height: Int(o.height), at: p)
+                                    .position(x: p.x * g.size.width, y: max(p.y * g.size.height - 110, 70))
+                            }
+                        }
+                    }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -137,14 +165,32 @@ struct StudioView: View {
                         .font(.caption).foregroundStyle(Theme.dim)
                 }
                 Spacer()
+                Button { rate(o, good: true) } label: {
+                    Image(systemName: rated == true ? "hand.thumbsup.fill" : "hand.thumbsup").font(.title3)
+                        .foregroundStyle(rated == true ? Theme.amber : .white)
+                }
+                Button { rate(o, good: false) } label: {
+                    Image(systemName: rated == false ? "hand.thumbsdown.fill" : "hand.thumbsdown").font(.title3)
+                        .foregroundStyle(rated == false ? Theme.amber : .white)
+                }
+                Menu {
+                    Button { showCompare = true } label: { Label("Compare models on a crop", systemImage: "square.grid.2x2") }
+                    Section("Help tune PixelBoost") {
+                        Button { example(o, "great_result") } label: { Label("Send as a great example", systemImage: "star") }
+                        Button { example(o, "bad_result") } label: { Label("Send as a bad example", systemImage: "exclamationmark.bubble") }
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle").font(.title3)
+                }
                 Button { comparing.toggle() } label: {
                     Image(systemName: "rectangle.lefthalf.filled").font(.title3)
                         .foregroundStyle(comparing ? Theme.amber : .white)
                 }
                 .disabled(resultPreview == nil)
             }
+            Text("Hold the picture to inspect pixels").font(.caption2).foregroundStyle(Theme.dim)
             if app.sourceAsset != nil {
-                Button { app.replaceOriginal(with: URL(fileURLWithPath: o.outputPath), model: o.model, scale: lastScale) } label: {
+                Button { Feedback.kept(o.runId, how: "replace"); app.replaceOriginal(with: URL(fileURLWithPath: o.outputPath), model: o.model, scale: lastScale) } label: {
                     Label("Replace original in Photos", systemImage: "arrow.triangle.2.circlepath")
                         .font(.subheadline.weight(.bold)).frame(maxWidth: .infinity).padding(.vertical, 11)
                         .background(Theme.energy, in: Capsule()).foregroundStyle(.black)
@@ -160,10 +206,11 @@ struct StudioView: View {
                 }
                 .buttonStyle(.plain)
                 action("Edit", "slider.horizontal.3") {
+                    Feedback.kept(o.runId, how: "edit")
                     app.commit(URL(fileURLWithPath: o.outputPath), step: "Upscale \(o.width)×\(o.height)")
                     app.mode = .edit
                 }
-                action("Again", "arrow.counterclockwise") { job.reset() }
+                action("Again", "arrow.counterclockwise") { Feedback.rerun(o.runId); job.reset() }
             }
             .font(.subheadline.weight(.medium))
         }
@@ -198,12 +245,27 @@ struct StudioView: View {
         UIApplication.shared.isIdleTimerDisabled = true
         Task {
             let s = await choice.resolved(for: url, cloud: false)
-            let quality = Int(s.ensemble), scale = Double(s.scale)
+            let scale = Double(s.scale)
             lastScale = s.scale
+            rated = nil
             let outW = Int((Double(info.width) * scale).rounded()), outH = Int((Double(info.height) * scale).rounded())
             let began = Date()
-            let o = await job.run(input: url, settings: s, base: app.preview, outW: outW, outH: outH)
+            let jobRef = job
+            background = BackgroundRun.begin(title: "Upscaling a photo", subtitle: "\(outW) × \(outH)") { jobRef.cancel() }
+            let o: UpscaleOutcome?
+            if app.frames > 1 {
+                o = await job.runAnimation(input: url, settings: s, frames: app.frames)
+            } else {
+                o = await job.run(input: url, settings: s, base: app.preview, outW: outW, outH: outH)
+            }
+            background?.finish(success: o != nil)
+            background = nil
             UIApplication.shared.isIdleTimerDisabled = false
+            if let o, !choice.smart {
+                // Manual settings: record where they differ from Auto's pick.
+                Feedback.overrides(o.runId, auto: await choice.analysis(for: url, cloud: false)?.settings, used: s)
+            }
+            Feedback.flushSoon()
             log(info: info, settings: s, outcome: o, ms: Int(Date().timeIntervalSince(began) * 1000))
             guard let o else { return }
             resultPreview = job.canvas
@@ -223,7 +285,19 @@ struct StudioView: View {
         }
     }
 
+    private func rate(_ o: UpscaleOutcome, good: Bool) {
+        guard rated != good else { return }
+        rated = good
+        Feedback.rate(o.runId, good: good)
+    }
+
+    private func example(_ o: UpscaleOutcome, _ reason: String) {
+        guard let src = app.current else { return }
+        Feedback.sendExample(run: o.runId, reason: reason, source: src, result: URL(fileURLWithPath: o.outputPath), note: "") { app.flash($0) }
+    }
+
     private func save(_ o: UpscaleOutcome) {
+        Feedback.kept(o.runId, how: "save")
         Task {
             do {
                 try await PhotoIO.saveToPhotos(URL(fileURLWithPath: o.outputPath))
@@ -282,16 +356,19 @@ struct PhotosMenu: View {
     @EnvironmentObject var app: AppModel
     @State private var showFiles = false
     @State private var picking = false
+    @State private var video = false
     var body: some View {
         Menu {
             Button { picking = true } label: { Label("Choose Photo", systemImage: "photo") }
             Button { app.pasteFromClipboard() } label: { Label("Paste", systemImage: "doc.on.clipboard") }
             Button { showFiles = true } label: { Label("Files", systemImage: "folder") }
+            Button { video = true } label: { Label("Upscale a video…", systemImage: "video") }
         } label: {
             Image(systemName: "photo.badge.plus").font(.system(size: 16, weight: .semibold))
                 .frame(width: 42, height: 42).background(Theme.card2, in: Circle())
         }
-        .fileImporter(isPresented: $showFiles, allowedContentTypes: [.image]) { r in
+        .sheet(isPresented: $video) { VideoSheet().presentationBackground(Theme.ink) }
+        .fileImporter(isPresented: $showFiles, allowedContentTypes: [.image, .gif]) { r in
             if case .success(let url) = r { app.importFile(url) }
         }
         .sheet(isPresented: $picking) {

@@ -5,6 +5,7 @@
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array>
 		<string>com.pixelboost.cloudcheck</string>
+		<string>com.pixelboost.upscale.*</string>
 	</array>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>

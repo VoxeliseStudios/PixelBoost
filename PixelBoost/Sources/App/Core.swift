@@ -10,6 +10,8 @@ enum Core {
         let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
         core.setCacheDir(dir: caches.path)
         core.setCompute(mode: UserDefaults.standard.string(forKey: "pb.compute") ?? "auto")
+        _ = Core.telemetry
+        _ = Core.downloads
         return core
     }()
 
@@ -31,6 +33,29 @@ enum Core {
         let v = UUID().uuidString
         UserDefaults.standard.set(v, forKey: k)
         return v
+    }()
+
+    /// Engine telemetry: queue in Caches, uploaded in batches (Feedback).
+    static let telemetry: Telemetry = {
+        let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("telemetry", isDirectory: true)
+        return Telemetry(dir: dir.path, deviceId: deviceID, appVersion: appVersion, osVersion: UIDevice.current.systemVersion,
+                         deviceModel: modelIdentifier, enabled: Prefs.telemetry)
+    }()
+
+    /// Optional models downloaded on demand (Application Support/Models).
+    static let downloads: ModelStore = {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Models", isDirectory: true)
+        return ModelStore(dir: dir.path)
+    }()
+
+    /// The user's own Pixel Art palettes.
+    static let palettes = PaletteStore(dir: documents.appendingPathComponent("Palettes", isDirectory: true).path)
+
+    /// "iPhone17,1" (hardware model; speeds are per chip).
+    static let modelIdentifier: String = {
+        var u = utsname()
+        uname(&u)
+        return withUnsafeBytes(of: &u.machine) { b in String(decoding: b.prefix(while: { $0 != 0 }), as: UTF8.self) }
     }()
 
     static let server: ServerClient = {

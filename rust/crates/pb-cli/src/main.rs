@@ -90,6 +90,15 @@ fn convert(src: &Path, dst: &Path) -> Result<(), String> {
     // Round-trip check: the converted file must build.
     let w = pb_nn::pbm::read(&out)?;
     pb_nn::build(&w)?;
+    // RRDB networks ship as int8 (half the size; eval within 0.03 dB of
+    // fp16). The small SRVGG ones stay fp16 (they lose ~0.05 dB in int8).
+    let out = if arch == "rrdb" {
+        let q = pb_nn::pbm::quantize_q8(&w).0;
+        pb_nn::build(&pb_nn::pbm::read(&q)?)?;
+        q
+    } else {
+        out
+    };
     std::fs::write(dst, &out).map_err(|e| e.to_string())?;
     println!("{} -> {} ({arch} {cfg}, {params} params, {:.1} MB)", src.display(), dst.display(), out.len() as f64 / 1e6);
     Ok(())

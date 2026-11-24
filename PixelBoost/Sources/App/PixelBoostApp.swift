@@ -7,6 +7,7 @@ struct PixelBoostApp: App {
 
     init() {
         CloudStore.register()
+        Task { @MainActor in Feedback.start() }
     }
 
     var body: some Scene {
@@ -20,7 +21,9 @@ struct PixelBoostApp: App {
         .onChange(of: scenePhase) { _, phase in
             // iOS forbids GPU work in the background: running upscales
             // carry on on the CPU until the app is back.
-            Core.engine.setGpuPaused(paused: phase != .active)
+            // (A continued-processing job the system gave GPU time keeps it.)
+            Core.engine.setGpuPaused(paused: phase != .active && !BackgroundRun.gpuGranted)
+            if phase == .background { Feedback.flushSoon() }
             if phase == .active { app.pickUpSharedPhoto() }
             if phase == .background, CloudStore.shared.activeCount > 0 { CloudStore.scheduleRefresh() }
         }

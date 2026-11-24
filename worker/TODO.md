@@ -24,3 +24,12 @@ the same WORKER_KEY (Mel ~/bots/Music/.env: PIXELBOOST_WORKER_KEY).
 ## 5.5 (2026-11-16)
 - [x] Settings left on Auto (model, clarity "auto", detail < 0, quality 0, prescale 0) are resolved
       from the photo with the server budget (all 8 passes when the network input is <= 0.4 MP).
+
+## 5.7 (2026-11-24)
+- [x] GPU: image built with `--features gpu`, Mesa RADV (debian trixie), `/dev/dri/renderD128`
+      + render group, tune cache `/jobs/.gpu-tune.json`.
+- [x] Yields the GPU to games: `~/.local/bin/gamemode-start.sh` touches
+      `/mnt/fastssd/pixelboost-jobs/.gaming`, `gamemode-end.sh` removes it.
+- [x] Telemetry: every job records upscale + job events; the bridge pulls `/telemetry/drain`.
+- [x] Optional models from `Models/downloads` (`MODELS_EXTRA_DIR=/models-extra`).
+- [x] Settings `dehalo` (Auto = -1).

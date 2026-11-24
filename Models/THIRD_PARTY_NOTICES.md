@@ -54,3 +54,12 @@ The text tool bundles NotoSans-Regular, NotoSans-Black, NotoSerif-Bold,
 NotoSerifDisplay-BlackItalic and NotoSansMono-Bold from the Noto project
 (Google), licensed under the SIL Open Font License 1.1 — full text in
 `rust/crates/pb-core/fonts/OFL.txt`.
+
+## U²-Net (u2netp) and IS-Net / DIS (isnet-general-use)
+
+Segmentation weights by Xuebin Qin et al. — U-2-Net
+(https://github.com/xuebinqin/U-2-Net) and DIS / IS-Net
+(https://github.com/xuebinqin/DIS), both under the Apache License 2.0
+(https://www.apache.org/licenses/LICENSE-2.0). Converted to `.pbnn`
+(batch-norm folded; IS-Net weights quantised to int8) — the network
+structure is unchanged.

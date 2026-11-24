@@ -94,6 +94,31 @@ impl VideoUpscaler {
         Ok(RgbaImage { width: out.w as u32, height: out.h as u32, rgba: out.data })
     }
 
+    /// Video frames as the platform decodes them: BGRA rows with `stride`
+    /// bytes each. Returns the upscaled frame as tightly packed BGRA.
+    pub fn push_bgra(&self, width: u32, height: u32, stride: u32, data: Vec<u8>) -> Result<RgbaImage, PbError> {
+        let (w, h, st) = (width as usize, height as usize, stride as usize);
+        if st < w * 4 || data.len() < st * (h.max(1) - 1) + w * 4 {
+            return Err(PbError::from("frame buffer too small".to_string()));
+        }
+        let mut rgba = vec![0u8; w * h * 4];
+        for y in 0..h {
+            for x in 0..w {
+                let s = y * st + x * 4;
+                let d = (y * w + x) * 4;
+                rgba[d] = data[s + 2];
+                rgba[d + 1] = data[s + 1];
+                rgba[d + 2] = data[s];
+                rgba[d + 3] = 255;
+            }
+        }
+        let mut out = self.push(RgbaImage { width, height, rgba })?;
+        for p in out.rgba.chunks_exact_mut(4) {
+            p.swap(0, 2);
+        }
+        Ok(out)
+    }
+
     /// Output size for a source frame size.
     pub fn output_size(&self, width: u32, height: u32) -> Vec<u32> {
         let s = self.settings.scale.clamp(1.0, 8.0);

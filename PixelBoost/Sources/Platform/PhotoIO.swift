@@ -49,6 +49,8 @@ enum PhotoIO {
         let b = [UInt8](d.prefix(12))
         if b.count >= 8, b[0] == 0x89, b[1] == 0x50 { return "png" }
         if b.count >= 3, b[0] == 0xFF, b[1] == 0xD8 { return "jpg" }
+        // GIF keeps its bytes (animated GIFs are upscaled frame by frame).
+        if b.count >= 4, b[0] == 0x47, b[1] == 0x49, b[2] == 0x46, b[3] == 0x38 { return "gif" }
         if b.count >= 12, b[0] == 0x52, b[1] == 0x49, b[8] == 0x57, b[9] == 0x45 { return "webp" }
         if b.count >= 4, b[0] == 0x76, b[1] == 0x2F, b[2] == 0x31, b[3] == 0x01 { return "exr" }
         return nil

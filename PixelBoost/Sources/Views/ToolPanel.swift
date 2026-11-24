@@ -74,6 +74,11 @@ struct ToolPanel: View {
     // Cutout
     @State private var maskURL: URL?
     @State private var cutBusy = false
+    /// Cutout run id (telemetry: brush touch-ups = mask corrections).
+    @State private var cutRun: String?
+    @AppStorage("pb.cutoutHQ") private var cutoutHQ = true
+    /// Heal: rebuild texture (PatchMatch) or smooth fill (diffusion).
+    @AppStorage("pb.healMode") private var healMode = "texture"
     @State private var background = "none"
 
     var body: some View {
@@ -193,7 +198,7 @@ struct ToolPanel: View {
             return opJSON("chain", ["ops": [s]])
         case .heal:
             guard let m = maskFile() else { return nil }
-            return opJSON("inpaint", ["mask": m.path])
+            return opJSON(healMode == "texture" ? "heal" : "inpaint", ["mask": m.path])
         case .clone:
             return nil
         case .cutout:
@@ -245,6 +250,11 @@ struct ToolPanel: View {
 
     private func applyNow() {
         guard let op else { return }
+        if tool == .cutout, let run = cutRun, editor.brushActive, !editor.strokes.isEmpty {
+            // How much of the mask the user repainted: the cutout's error.
+            let area = editor.strokes.reduce(0.0) { $0 + Double($1.points.count) * Double($1.radius * $1.radius) * 3.0 }
+            Feedback.send(run, "mask_fix", min(area, 1), ["strokes": editor.strokes.count])
+        }
         session.apply(op, to: app, name: tool.title)
         close()
     }
@@ -252,12 +262,13 @@ struct ToolPanel: View {
     private func makeCutout(at p: CGPoint?) {
         guard let src = app.current else { return }
         cutBusy = true
+        let hq = cutoutHQ
         Task.detached {
-            let r = Result { try SubjectMask.make(for: src, at: p) }
+            let r = Result { try SubjectMask.make(for: src, at: p, hq: hq) }
             await MainActor.run {
                 cutBusy = false
                 switch r {
-                case .success(let u): maskURL = u
+                case .success(let m): maskURL = URL(fileURLWithPath: m.path); cutRun = m.runId
                 case .failure(let e): app.message = describe(e)
                 }
             }
@@ -340,8 +351,10 @@ struct ToolPanel: View {
             }
         case .heal:
             VStack(spacing: 10) {
+                ChipPicker(options: [("texture", "Rebuild texture"), ("smooth", "Smooth fill")], selection: $healMode)
                 brushControls
-                Text("Paint over what should disappear.").font(.caption).foregroundStyle(Theme.dim)
+                Text(healMode == "texture" ? "Paint over what should disappear; the texture around it is rebuilt there." : "Paint over scratches and specks; filled with the surrounding colour.")
+                    .font(.caption).foregroundStyle(Theme.dim)
             }
         case .clone:
             VStack(spacing: 10) {
@@ -358,6 +371,7 @@ struct ToolPanel: View {
                     if cutBusy { ProgressView() }
                 }
                 .buttonStyle(.bordered)
+                CutoutQualityRow(hq: $cutoutHQ)
                 if maskURL != nil {
                     Toggle("Touch up with brush", isOn: $editor.brushActive)
                     if editor.brushActive { brushControls }
@@ -367,7 +381,7 @@ struct ToolPanel: View {
             }
         case .pixelArt:
             if let settings = Binding($pixel) {
-                PixelArtControls(settings: settings, style: $pixelStyle)
+                PixelArtControls(settings: settings, style: $pixelStyle, base: session.base)
             }
         case .lut:
             VStack(spacing: 10) {

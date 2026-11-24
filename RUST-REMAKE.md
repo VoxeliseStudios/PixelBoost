@@ -198,6 +198,17 @@ Models/pbnn/       converted models (fp16 .pbnn)
       the App Group), AltStore source serves the identical file, repo back to
       private.
 
+## 5.7 — 15 upgrades + telemetry everywhere (2026-11-23/24)
+
+Details and numbers in rust/TODO.md (5.7). In short: telemetry from every
+custom system to the bridge (and `pixelboost telemetry report`), GPU f16
+storage + CPU/GPU overlap, f16 CPU weights, strip-based full-res edits,
+draft previews, int8 models + optional downloads, worker on the iGPU with
+gamemode yield, own cutout networks (U²-Net-p / IS-Net), halo detection +
+dehalo, PatchMatch healing, batch edits, model compare + loupe, animated
+and video upscaling with temporal stabilisation, iOS 26 continued
+processing, pixel art palettes / star test / skin weight, arc-length rings.
+
 ## Bench numbers (26 gallery images, 256px GT crop -> 64px -> 4x)
 
 Final settings (`pixelboost eval testimages/src OUT --crop 256`):

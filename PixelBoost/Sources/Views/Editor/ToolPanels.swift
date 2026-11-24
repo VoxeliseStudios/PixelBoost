@@ -347,7 +347,7 @@ struct BlurPanel: View {
         guard let src = app.current, !finding else { return }
         finding = true
         Task.detached {
-            let r = try? SubjectMask.make(for: src)
+            let r = (try? SubjectMask.make(for: src)).map { URL(fileURLWithPath: $0.path) }
             await MainActor.run { subject = r; finding = false }
         }
     }

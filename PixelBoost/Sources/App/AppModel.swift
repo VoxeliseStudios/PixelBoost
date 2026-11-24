@@ -16,6 +16,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var current: URL?
     @Published private(set) var preview: UIImage?
     @Published private(set) var info: ImageInfo?
+    /// Frames when the photo is an animated GIF / APNG / WebP (else 1).
+    @Published private(set) var frames = 1
     @Published var message: String?
     @Published var showExport = false
     @Published var showHistory = false
@@ -126,13 +128,17 @@ final class AppModel: ObservableObject {
     private func show(_ url: URL) {
         current = url
         let path = url.path
+        frames = 1
         Task.detached(priority: .userInitiated) {
             let info = try? Core.engine.imageInfo(path: path)
             let img = (try? Core.engine.loadPreview(path: path, maxSide: 2048))?.uiImage
+            let ext = url.pathExtension.lowercased()
+            let n = ["gif", "png", "webp"].contains(ext) ? Int((try? Core.engine.animationInfo(path: path))?.frames ?? 1) : 1
             await MainActor.run {
                 guard self.current == url else { return }
                 self.info = info
                 self.preview = img
+                self.frames = n
             }
         }
     }

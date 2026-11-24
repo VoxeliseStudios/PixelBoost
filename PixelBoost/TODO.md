@@ -88,3 +88,25 @@ operation is a call into PixelBoostCore (Rust).
 - [ ] On device: check preview speed while dragging sliders (Rust renders a
       1.5 MP preview in ~90 ms on desktop).
 - [ ] Custom palette editor (the op already takes `custom` colours).
+
+## 5.7 (2026-11-24)
+
+- [x] Telemetry glue `App/Feedback.swift` (device context, flush on
+      background, feedback: kept / discarded / rating / rerun / Auto
+      overrides / compare pick / cutout mask fixes, "Send as an example").
+      Settings › Telemetry (off deletes the queue), Settings › Extra models.
+- [x] `App/BackgroundRun.swift`: iOS 26 BGContinuedProcessingTask for
+      upscales and videos (GPU when the system grants it); Info.plist
+      `com.pixelboost.upscale.*`.
+- [x] Studio: thumbs up/down, ⋯ menu (Compare models, send example), hold
+      the result for the pixel loupe, animated GIF / APNG / WebP upscales.
+- [x] `Views/CompareSheet.swift` (model grid, tap to pick, loupe),
+      `Views/VideoSheet.swift` + `Platform/VideoPump.swift` (AVFoundation
+      frames <-> Rust VideoUpscaler, sound kept).
+- [x] Cutout on Rust networks (`Platform/SubjectMask.swift`), HQ toggle;
+      Heal: Rebuild texture / Smooth fill; Batch › Apply edits; Pixel Art
+      custom palettes (`PaletteEditor`); live previews use Rust drafts.
+- [ ] First CI build of 5.7: fix whatever the macOS compiler reports (Linux
+      only type-checks the Rust API calls, `swiftc -parse` the rest).
+- [ ] On device: video export of a 1080p clip, BG task progress UI, loupe
+      feel, compare grid speed.

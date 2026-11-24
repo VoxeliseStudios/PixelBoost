@@ -153,40 +153,80 @@ Overall tracker: ../RUST-REMAKE.md
 - [ ] GPU path not needed (64 MP in ~1 s on CPU); revisit only if previews
       feel slow on older iPhones.
 
-## 5.7 — "Everything pass": 15 upgrades + telemetry (started 2026-11-23)
+## 5.7 — "Everything pass": 15 upgrades + telemetry (2026-11-23/24)
 
-Plan agreed with the user (all 15 + telemetry on every custom system).
-Order: telemetry core first (so every new system reports from day one),
-then speed, quality, features, Swift screens, CI, release.
+- [x] T  Telemetry: `pb_nn::telemetry` (events / metrics / tags, run ids,
+         thread-scoped run, spans, sampled distributions for live previews,
+         memory footprint) re-exported by pb-core (+ image fingerprint).
+         Instrumented: upscale runs (net vs post time, tile p50/p90, GPU
+         stall, overlap, prescale, dehalo, memory), analyzer (every measure
+         + decision + budget + fixed fields), real-resolution loss curves,
+         GPU init / self-check / tune / disable / device loss, editor ops
+         (full-res events, preview distributions, drafts), pixel art,
+         cutout, healing, batch, compare, animation, model downloads,
+         worker jobs. pb-ffi `Telemetry` (JSONL queue in Caches, 400-event
+         batches, device context, opt-out deletes the queue, feedback:
+         kept / discarded / rating / rerun / override / compare_pick /
+         mask_fix, opt-in example crops). pb-server: `telemetry_events`,
+         `telemetry_samples` (30-day TTL), `/log/telemetry` (POST batch,
+         GET export), `/log/telemetry/summary`, `/log/telemetry/feedback`,
+         `/log/telemetry/sample(s)`; bridge pulls the worker's events every
+         minute (`/telemetry/drain`). CLI `pixelboost telemetry pull|report`,
+         `PB_TELEMETRY=file.jsonl` for any command. E2E test
+         `pb-ffi/tests/telemetry_e2e.rs` (scratch Postgres + local bridge).
+- [x] 1  GPU f16 storage (`shader-f16`): maps, weights, residuals as f16,
+         f32 math; self-check retries f32 if f16 fails. Radeon 610M: 311 vs
+         267 GFLOP/s best case, max |cpu-gpu| 2e-3 on real models.
+- [x] 2  CPU: packed weights stay f16 in memory, expanded per row (vectorised
+         bit trick): half the RAM per network, same speed, identical output.
+         (An f16-arithmetic NEON kernel was not done: the 6x16 kernel is
+         compute-bound, and its speed can't be measured off-device.)
+- [x] 3  GPU network of tile n+1 overlaps CPU post-processing of tile n
+         (`PB_NO_OVERLAP=1` to compare): -4..10 % time here, identical bytes.
+- [x] 4  `strips`: pointwise ops on 256-row strips of the 8-bit picture
+         (48 MP adjust: 810 -> 325 MB, 13 -> 2.6 s), in-place / consuming
+         application for the rest (clarity 2.2 -> 1.5 GB). Blur-type ops
+         still need input + output as f32 (2.9 GB at 48 MP).
+- [x] 5  Zoom / spin blur: samples follow streak length + box mips for long
+         streaks (no ghosting); live previews render as drafts (smaller, same
+         look) when an op misses the 18 ms budget, then once in full.
+- [x] 6  `.pbnn` v2 (`q8`, `f32` dtypes), `pixelboost quantize`; bundled
+         models 111 -> 47 MB; Native 2x + HQ cutout as downloads
+         (ModelStore: resume, SHA-256, atomic install; bridge
+         `/models/file/{name}`; analyzer / FFI fall back to Photo when Native
+         2x is missing).
+- [x] 7  Worker image: `--features gpu`, Mesa RADV (trixie), /dev/dri,
+         `PB_GPU_TUNE` cache; gamemode hooks create `/jobs/.gaming` -> GPU
+         paused (CPU) while a game runs.
+- [x] 8  `pb_nn::seg` (U²-Net / IS-Net: dilated conv via polyphase, ceil
+         max-pool, bilinear, BN folding, legacy torch checkpoints) +
+         `pb_core::segment` (guided-filter edge refinement), FFI
+         `subject_mask` (tap = keep that subject). Replaces Vision.
+- [x] 9  `dehalo`: two-sided overshoot score at 1x / 2x / 3x, directional
+         plateau clamp at the halo's scale; analyzer judges real resolution
+         on an un-sharpened copy when halos are clear (blown-up + sharpened
+         bench: eff 1.29 -> 1.94; clean set unchanged). `Settings.dehalo`,
+         Auto = -1.
+- [x] 10 `heal`: Wexler / PatchMatch completion, coarse to fine, in a window
+         around the hole; op `heal`.
+- [x] 12 FFI `batch_edit` (strips path per photo).
+- [x] 13 FFI `compare_models` (crop through models / variants, fidelity +
+         detail scores), `loupe` (nearest-neighbour pixels).
+- [x] 14 `animate`: GIF / APNG / WebP decode, `Temporal` stabiliser (keeps
+         output where the source didn't change, dedups frames), streamed
+         APNG / GIF writer; FFI `upscale_animation`, `VideoUpscaler`
+         (`push_bgra` for AVFoundation frames).
+- [x] 15 Pixel art: skin-weighted palette k-means, star shape test on the
+         source (drops glossy streaks), `extract_palette`, custom palettes
+         (`PaletteStore`, settings `custom`); shape rings: dashes / dots
+         spaced by arc length.
 
-- [ ] T  Telemetry: `pb_core::telemetry` (events, metrics, tags, sinks),
-         pb-ffi `Telemetry` (JSONL queue in Caches, batched upload, device
-         context, opt-out), pb-server `telemetry_events` + `telemetry_feedback`
-         + `telemetry_samples` (opt-in crops, 30-day TTL) + summary endpoints,
-         worker posts its own events, CLI `pixelboost telemetry` reports.
-         Instrument: upscale runs (per pass/tile timings, backend, GPU idle,
-         prescale, analyzer features + decision), analyzer, classify, GPU
-         tune/self-check/fallbacks, fusion, editor ops, pixel art, cutout,
-         healing, animation, compare picks, Auto overrides, ratings.
-- [ ] 1  GPU fp16 storage + math (`shader-f16`), checked against the CPU.
-- [ ] 2  aarch64 fp16 CPU kernel (FMLA .8h via asm), tested under qemu.
-- [ ] 3  CPU post-processing of tile n overlapped with GPU network of n+1.
-- [ ] 4  Editor memory: full-res edits on 8-bit strips (pointwise / local
-         ops), f32 only for global ops.
-- [ ] 5  Zoom / spin blur sample count scales with streak length; progressive
-         preview.
-- [ ] 6  int8 weight format (.pbnn v2, per-channel scales) + on-demand model
-         downloads (manifest, sha256, resumable) for rarely used models.
-- [ ] 7  Worker on the iGPU (RADV in the image, /dev/dri) + yield to gamemode.
-- [ ] 8  Own segmentation: pb-nn dilated/strided conv, maxpool, bilinear,
-         U²-Net-p (ships) + IS-Net general-use (download / cloud); guided
-         matting refine; replaces Vision `SubjectMask.swift`.
-- [ ] 9  Ringing / halo detector (earlier upscalers) + de-halo pre-pass.
-- [ ] 10 Healing brush: PatchMatch inpaint with texture-aware patches.
-- [ ] 11 iOS 26 BGContinuedProcessingTask for long upscales.
-- [ ] 12 Batch edits: preset / copied recipe over many photos (Rust batch).
-- [ ] 13 Model compare (crop through every model / variant) + pixel loupe.
-- [ ] 14 Animated GIF / APNG / WebP + video (AVFoundation frame pump in Swift,
-         Apple-required) upscaling with temporal consistency in Rust.
-- [ ] 15 Pixel Art: custom palette editor, arc-length ring dashes, sparkle
-         shape test, skin-aware palette.
+### Still open after 5.7
+- [ ] Verify on device: f16 Metal speed, BGContinuedProcessingTask (GPU
+      grant), video pump memory on 4K, cutout speed of IS-Net on A-series.
+- [ ] Blur-type ops at 48 MP: tile them with a halo (radius-bounded).
+- [ ] Dehalo sharpened-original false positives (4/26 bench images read
+      >= 2x); a learned real-resolution estimator would fix both.
+- [ ] Telemetry-driven re-fit of analyzer thresholds once data arrives
+      (`pixelboost telemetry report`).
+- [ ] Pale anime skin still shares palette colours at low widths.

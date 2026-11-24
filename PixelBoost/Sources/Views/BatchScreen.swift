@@ -14,6 +14,11 @@ struct BatchScreen: View {
     /// "new" (save results as new photos), "replace" (replace each
     /// original in the library) or "none".
     @AppStorage("batch.output") private var output = "new"
+    /// "upscale" or "edit" (apply a preset / copied edits to every photo).
+    @AppStorage("batch.task") private var task = "upscale"
+    /// Preset id, or "copied" for the copied edits.
+    @AppStorage("batch.recipe") private var recipe = "copied"
+    @State private var token = CancelToken()
 
     let choice = UpscaleChoice()
 
@@ -30,6 +35,20 @@ struct BatchScreen: View {
         NavigationStack {
             List {
                 Section {
+                    Picker("Do", selection: $task) {
+                        Text("Upscale").tag("upscale")
+                        Text("Apply edits").tag("edit")
+                    }
+                    .pickerStyle(.segmented)
+                    .disabled(running)
+                    if task == "edit" {
+                        Picker("Edits", selection: $recipe) {
+                            if app.copiedEdits != nil { Text("Copied edits").tag("copied") }
+                            ForEach(Core.presets.list(), id: \.id) { p in Text(p.name).tag(p.id) }
+                        }
+                    }
+                }
+                Section {
                     PhotosPicker(selection: $items, maxSelectionCount: 50, matching: .images, photoLibrary: .shared()) {
                         Label("Add photos", systemImage: "plus.circle.fill")
                     }
@@ -39,10 +58,14 @@ struct BatchScreen: View {
                         Text("Replace the originals").tag("replace")
                         Text("Keep in the app").tag("none")
                     }
+                    if task == "upscale" {
                     Text(choice.smart
                          ? "Runs on this iPhone. Smart settings look at each photo and choose its size, model and clean-up. For big batches, send them to PixelBoost Cloud instead."
                          : "Runs on this iPhone with your upscale settings: \(UpscaleChoice.name(choice.model)), \(Int(choice.scale))×, \(choice.fidelity). For big batches, send them to PixelBoost Cloud instead.")
                         .font(.caption).foregroundStyle(Theme.dim)
+                    } else {
+                        Text("The same edits on every photo, at full resolution, on this iPhone.").font(.caption).foregroundStyle(Theme.dim)
+                    }
                     if output == "replace" {
                         Text(PhotoLibrary.method == .edit
                              ? "Each original is replaced as an edit — Revert in Photos brings it back."
@@ -68,7 +91,7 @@ struct BatchScreen: View {
                     if running {
                         Section {
                             ProgressView(value: job.progress) { Text("Current photo") }
-                            Button("Stop after this photo", role: .destructive) { cancelled = true }
+                            Button("Stop after this photo", role: .destructive) { cancelled = true; token.cancel() }
                         }
                     }
                 }
@@ -104,6 +127,7 @@ struct BatchScreen: View {
     }
 
     private func start() {
+        if task == "edit" { startEdits(); return }
         running = true
         cancelled = false
         let activity = BatchActivity.start(total: queue.count)
@@ -153,6 +177,69 @@ struct BatchScreen: View {
             running = false
         }
     }
+}
+
+extension BatchScreen {
+    /// Apply one recipe to every queued photo (Rust batch_edit).
+    func startEdits() {
+        let op: String?
+        if recipe == "copied" {
+            op = app.copiedEdits
+        } else {
+            op = Core.presets.list().first { $0.id == recipe }?.opJson
+        }
+        guard let op else { app.message = "Choose the edits to apply (copy edits in the editor, or pick a preset)."; return }
+        let todo = queue.indices.filter { queue[$0].result == nil && queue[$0].source != nil }
+        guard !todo.isEmpty else { return }
+        running = true
+        token = CancelToken()
+        let inputs = todo.map { queue[$0].source!.path }
+        let outputs = todo.map { _ in Core.newFile("jpg").path }
+        for i in todo { queue[i].status = "Waiting" }
+        let listener = BatchRelay { idx, _, out, err in
+            Task { @MainActor in
+                let qi = todo[Int(idx)]
+                if err.isEmpty {
+                    queue[qi].result = URL(fileURLWithPath: out)
+                    queue[qi].status = "Edited"
+                    queue[qi].thumb = (try? Core.engine.loadPreview(path: out, maxSide: 160))?.uiImage
+                } else {
+                    queue[qi].status = "Failed: \(err)"
+                }
+            }
+        }
+        let tok = token
+        let (outMode, assets) = (output, todo.map { queue[$0].asset })
+        UIApplication.shared.isIdleTimerDisabled = true
+        Task {
+            let r = await Task.detached(priority: .userInitiated) {
+                Result { try Core.engine.batchEdit(inputs: inputs, outputs: outputs, opJson: op, listener: listener, cancel: tok) }
+            }.value
+            UIApplication.shared.isIdleTimerDisabled = false
+            switch r {
+            case .success(let sum):
+                for (k, out) in outputs.enumerated() where FileManager.default.fileExists(atPath: out) {
+                    let url = URL(fileURLWithPath: out)
+                    if outMode == "replace", let a = assets[k] {
+                        _ = try? await PhotoLibrary.replace(assetID: a, with: url, note: "{\"app\":\"PixelBoost\",\"op\":\"batch_edit\"}")
+                    } else if outMode == "new" {
+                        try? await PhotoIO.saveToPhotos(url)
+                    }
+                }
+                if sum.done > 0 { Feedback.kept(sum.runId, how: "batch_\(outMode)") }
+                app.flash("\(sum.done) edited" + (sum.failed > 0 ? ", \(sum.failed) failed" : ""))
+            case .failure(let e):
+                app.message = describe(e)
+            }
+            running = false
+        }
+    }
+}
+
+final class BatchRelay: BatchListener, @unchecked Sendable {
+    private let f: (UInt32, UInt32, String, String) -> Void
+    init(_ f: @escaping (UInt32, UInt32, String, String) -> Void) { self.f = f }
+    func onItem(index: UInt32, total: UInt32, outputPath: String, error: String) { f(index, total, outputPath, error) }
 }
 
 enum BatchActivity {

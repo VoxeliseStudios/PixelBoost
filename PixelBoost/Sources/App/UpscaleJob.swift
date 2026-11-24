@@ -26,6 +26,38 @@ final class UpscaleJob: ObservableObject {
 
     func cancel() { token.cancel() }
 
+    /// Upscale every frame of an animated GIF / APNG / WebP (GIF stays GIF,
+    /// the rest become APNG). Progress counts frames.
+    func runAnimation(input: URL, settings: UpscaleSettings, frames: Int) async -> UpscaleOutcome? {
+        token = CancelToken()
+        state = .running
+        done = 0
+        total = frames
+        outcome = nil
+        startedAt = Date()
+        let token = self.token
+        let gif = input.pathExtension.lowercased() == "gif"
+        let out = Core.newFile(gif ? "gif" : "png")
+        let listener = FrameProgress { [weak self] d, t in
+            Task { @MainActor in self?.done = d; self?.total = t }
+        }
+        let result = await Task.detached(priority: .userInitiated) { () -> Result<AnimationOutcome, Error> in
+            Result { try Core.engine.upscaleAnimation(inputPath: input.path, outputPath: out.path, settings: settings, listener: listener, cancel: token) }
+        }.value
+        switch result {
+        case .success(let a):
+            let o = UpscaleOutcome(outputPath: a.outputPath, width: a.width, height: a.height, model: settings.model, seconds: a.seconds, fidelityDb: 0,
+                                   tiles: a.frames, passes: 1, capped: false, backend: "", adaptive: settings.adaptive, prescale: 1, runId: a.runId)
+            outcome = o
+            state = .done
+            canvas = (try? Core.engine.loadPreview(path: a.outputPath, maxSide: 2048))?.uiImage
+            return o
+        case .failure(let e):
+            if let pe = e as? PbError, case .Cancelled = pe { state = .idle } else { state = .failed(describe(e)) }
+            return nil
+        }
+    }
+
     func reset() {
         state = .idle
         canvas = nil
@@ -73,6 +105,12 @@ final class UpscaleJob: ObservableObject {
             return nil
         }
     }
+}
+
+final class FrameProgress: FrameListener, @unchecked Sendable {
+    private let f: (Int, Int) -> Void
+    init(_ f: @escaping (Int, Int) -> Void) { self.f = f }
+    func onFrame(done: UInt32, total: UInt32) { f(Int(done), Int(total)) }
 }
 
 /// Receives tiles from Rust (on its worker thread) and composites them into

@@ -27,7 +27,7 @@ struct UpscaleChoice: DynamicProperty {
     var settings: UpscaleSettings {
         UpscaleSettings(model: model, scale: Float(scale), fidelity: fidelity, detail: detailAuto ? -1 : Float(detail),
                         denoise: Float(denoise), ensemble: UInt32(max(quality, 0)), tile: 128, maxOutputMp: 120,
-                        realism: Float(realism), adaptive: adaptive, prescale: 0)
+                        realism: Float(realism), adaptive: adaptive, prescale: 0, dehalo: -1)
     }
 
     /// Settings for the server worker.
@@ -36,7 +36,7 @@ struct UpscaleChoice: DynamicProperty {
     static func cloudSettings(_ s: UpscaleSettings) -> [String: Any] {
         ["model": s.model, "scale": Double(s.scale), "fidelity": s.fidelity, "detail": Double(s.detail), "denoise": Double(s.denoise),
          "ensemble": Int(s.ensemble), "format": "png", "realism": Double(s.realism), "adaptive": s.adaptive,
-         "prescale": Double(s.prescale)]
+         "prescale": Double(s.prescale), "dehalo": Double(s.dehalo)]
     }
 
     /// Smart analysis of a photo for where it will run (cached per photo).

@@ -44,6 +44,13 @@ struct SettingsScreen: View {
                         }
                     }
                 }
+                DownloadsSection()
+                Section {
+                    Toggle("Help tune PixelBoost", isOn: $telemetry)
+                    LabeledContent("Waiting to send", value: "\(Core.telemetry.pending()) events")
+                } header: { Text("Telemetry") } footer: {
+                    Text("Sends measurements only — timings, chosen settings, what the engine measured (noise, halos, real resolution…), GPU speed and whether you kept a result. Never pictures, file names or text. Examples are sent only when you tap “Send as an example” on a result. Turning this off deletes anything not yet sent.")
+                }
                 Section {
                     Picker("Replace method", selection: $replaceMethod) {
                         ForEach(PhotoLibrary.Method.allCases) { m in Text(m.title).tag(m.rawValue) }
@@ -54,7 +61,6 @@ struct SettingsScreen: View {
                 Section {
                     TextField("Server URL", text: $server).textInputAutocapitalization(.never).autocorrectionDisabled()
                     SecureField("API key (optional)", text: $apiKey)
-                    Toggle("Send anonymous diagnostics", isOn: $telemetry)
                     Button("Test connection") { test() }
                     if let health { Text(health).font(.caption).foregroundStyle(Theme.dim) }
                 } header: { Text("Server") } footer: {
@@ -90,6 +96,7 @@ struct SettingsScreen: View {
             .onChange(of: compute) { _, v in Core.engine.setCompute(mode: v); loadCompute() }
             .task { loadCompute() }
             .onChange(of: apiKey) { _, _ in Core.server.configure(baseUrl: server, apiKey: Prefs.apiKey) }
+            .onChange(of: telemetry) { _, on in Core.telemetry.setEnabled(on: on); if on { Feedback.flushSoon() } }
         }
     }
 
@@ -146,5 +153,76 @@ struct SettingsScreen: View {
                 }
             }
         }
+    }
+}
+
+/// Optional models: download / remove (Rust ModelStore does the transfer,
+/// resume and checksum).
+struct DownloadsSection: View {
+    @State private var items: [ModelDownload] = []
+    @State private var progress: [String: Double] = [:]
+    @State private var error: String?
+
+    var body: some View {
+        Section {
+            ForEach(items, id: \.id) { m in
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text(m.title).font(.subheadline.weight(.semibold))
+                        Spacer()
+                        if let p = progress[m.id] {
+                            ProgressView(value: p).frame(width: 90)
+                        } else if m.installed {
+                            Button("Remove", role: .destructive) { try? Core.downloads.remove(id: m.id); reload() }.font(.caption)
+                        } else {
+                            Button(m.partial > 0 ? "Resume" : "Get · \(formatBytes(m.bytes))") { download(m) }.font(.caption.weight(.semibold))
+                        }
+                    }
+                    Text(m.detail).font(.caption).foregroundStyle(Theme.dim)
+                }
+            }
+            if let error { Text(error).font(.caption).foregroundStyle(.red) }
+        } header: { Text("Extra models") } footer: {
+            Text("Downloaded from the PixelBoost server, checked, and kept on this iPhone (\(formatBytes(Core.downloads.diskBytes())) used).")
+        }
+        .onAppear(perform: reload)
+    }
+
+    private func reload() { items = Core.downloads.list() }
+
+    private func download(_ m: ModelDownload) {
+        progress[m.id] = 0
+        error = nil
+        let id = m.id
+        let listener = DownloadRelay { r, t in Task { @MainActor in progress[id] = t > 0 ? Double(r) / Double(t) : 0 } }
+        Task.detached(priority: .userInitiated) {
+            let r = Result { try Core.downloads.download(server: Core.server, id: id, progress: listener) }
+            await MainActor.run {
+                progress[id] = nil
+                if case .failure(let e) = r { error = describe(e) }
+                reload()
+            }
+        }
+    }
+}
+
+final class DownloadRelay: ModelProgress, @unchecked Sendable {
+    private let f: (UInt64, UInt64) -> Void
+    init(_ f: @escaping (UInt64, UInt64) -> Void) { self.f = f }
+    func onProgress(received: UInt64, total: UInt64) { f(received, total) }
+}
+
+/// Cutout quality: HQ needs the IS-Net download.
+struct CutoutQualityRow: View {
+    @Binding var hq: Bool
+    @State private var installed = Core.downloads.installed(id: "cutout-hq")
+    var body: some View {
+        HStack {
+            Toggle("HQ edges (IS-Net)", isOn: $hq).font(.subheadline)
+            if hq && !installed {
+                Text("Download it in Settings › Extra models").font(.caption2).foregroundStyle(Theme.amber)
+            }
+        }
+        .onAppear { installed = Core.downloads.installed(id: "cutout-hq") }
     }
 }
