@@ -100,6 +100,7 @@ pub fn effective_scale(crop: &Image) -> f32 {
     let mut best = 1.0;
     // Telemetry: the loss curve the 1.2-level threshold is applied to.
     let mut ev = crate::telemetry::event("classify", "real_resolution");
+    let mut failed = false;
     for s in [1.25f32, 1.5, 2.0, 2.5, 3.0, 4.0] {
         let (sw, sh) = (((w as f32 / s).round() as usize).max(8), ((h as f32 / s).round() as usize).max(8));
         let back = resize(&resize(crop, sw, sh, Filter::Lanczos3), w, h, Filter::CatmullRom);
@@ -113,10 +114,14 @@ pub fn effective_scale(crop: &Image) -> f32 {
         }
         let rms = (se / n.max(1) as f64).sqrt();
         ev = ev.metric(&format!("rms@{s}"), rms);
-        if rms < 1.2 {
+        if rms < 1.2 && !failed {
             best = s;
         } else {
-            break;
+            failed = true;
+            // Keep measuring only for the telemetry curve.
+            if !ev.active() {
+                break;
+            }
         }
     }
     ev.metric("eff", best).emit();

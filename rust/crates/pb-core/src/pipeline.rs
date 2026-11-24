@@ -35,6 +35,9 @@ pub struct Settings {
     /// `analyze`); the output size still follows `scale` of the original.
     #[serde(default = "full")]
     pub prescale: f32,
+    /// Remove halos from earlier sharpening first (0 = off .. 1).
+    #[serde(default)]
+    pub dehalo: f32,
 }
 
 fn full() -> f32 {
@@ -47,7 +50,7 @@ fn one() -> usize {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { scale: 4.0, fidelity: Fidelity::Natural, detail: 0.35, tile: 128, pad: 16, ensemble: 1, realism: 1.0, adaptive: false, prescale: 1.0 }
+        Settings { scale: 4.0, fidelity: Fidelity::Natural, detail: 0.35, tile: 128, pad: 16, ensemble: 1, realism: 1.0, adaptive: false, prescale: 1.0, dehalo: 0.0 }
     }
 }
 

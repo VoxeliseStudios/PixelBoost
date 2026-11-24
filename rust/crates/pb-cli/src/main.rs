@@ -296,6 +296,18 @@ fn main() {
     }
 }
 
+/// Classic (haloing) unsharp mask: img + amount * (img - blur).
+fn usm(img: &Image, amount: f32, sigma: f32) -> Image {
+    let b = pb_core::filters::gauss(img, sigma);
+    let mut o = img.clone();
+    for (p, q) in o.px.iter_mut().zip(&b.px) {
+        for c in 0..3 {
+            p[c] = (p[c] + amount * (p[c] - q[c])).clamp(0.0, 1.0);
+        }
+    }
+    o
+}
+
 fn degrade(img: &Image, how: &str) -> Image {
     use pb_core::resample::{resize, Filter};
     match how {
@@ -314,6 +326,13 @@ fn degrade(img: &Image, how: &str) -> Image {
             }
             o
         }
+        "halo" => {
+            // Blown up 3x by a classic upscaler, then over-sharpened.
+            let s = resize(img, (img.w / 3).max(8), (img.h / 3).max(8), Filter::Box);
+            usm(&resize(&s, img.w, img.h, Filter::CatmullRom), 1.2, 2.5)
+        }
+        // Classic unsharp mask straight on the original.
+        "sharp" => usm(img, 1.0, 1.2),
         "jpeg" => {
             let bytes = img.encode(pb_core::image::Format::Jpeg, 20).unwrap();
             Image::decode(&bytes).unwrap()
@@ -338,8 +357,8 @@ fn analyze_cmd(args: &[String]) -> Result<(), String> {
         let r = pb_core::analyze::recommend(&m, b);
         let name = Path::new(f).file_name().unwrap().to_string_lossy();
         println!(
-            "{name:<12} {:>4}x{:<4} {:<5} eff {:.2} line {:.3} pal {:.2} noise {:>5.2} block {:.2} sharp {:.3} skin {:.2} | {}{} {}x pre {:.2} {} d{:.2} dn{:.2} e{} ~{:.0}s  ({:.0} ms)",
-            m.width, m.height, m.kind, m.eff, m.line, m.palette, m.noise, m.blocking, m.sharpness, m.skin, r.model, if r.adaptive { "+adaptive" } else { "" }, r.scale, r.prescale, r.fidelity, r.detail, r.denoise, r.ensemble, r.est_seconds, t.elapsed().as_secs_f64() * 1000.0
+            "{name:<12} halo {:.2} {:>4}x{:<4} {:<5} eff {:.2} line {:.3} pal {:.2} noise {:>5.2} block {:.2} sharp {:.3} skin {:.2} | {}{} {}x pre {:.2} {} d{:.2} dn{:.2} e{} ~{:.0}s  ({:.0} ms)",
+            m.halo, m.width, m.height, m.kind, m.eff, m.line, m.palette, m.noise, m.blocking, m.sharpness, m.skin, r.model, if r.adaptive { "+adaptive" } else { "" }, r.scale, r.prescale, r.fidelity, r.detail, r.denoise, r.ensemble, r.est_seconds, t.elapsed().as_secs_f64() * 1000.0
         );
         if verbose {
             for w in &r.reasons {

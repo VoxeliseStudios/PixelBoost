@@ -46,6 +46,14 @@ static BACKEND: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0
 
 /// Choose the backend for engines loaded from now on (the app's setting;
 /// `PB_BACKEND=cpu|gpu` overrides it for the CLI and servers).
+/// Pause GPU networks (they run on the CPU meanwhile); see pb_gpu::set_paused.
+pub fn set_gpu_paused(p: bool) {
+    #[cfg(feature = "gpu")]
+    pb_gpu::set_paused(p);
+    #[cfg(not(feature = "gpu"))]
+    let _ = p;
+}
+
 pub fn set_backend(b: Backend) {
     BACKEND.store(b as u8, std::sync::atomic::Ordering::Relaxed);
 }

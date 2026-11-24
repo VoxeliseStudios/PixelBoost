@@ -70,6 +70,8 @@ pub struct UpscaleSettings {
     /// Shrink the input to its real resolution first: 0 = Auto (measured),
     /// 1 = off, else the fraction.
     pub prescale: f32,
+    /// Remove sharpening halos first: < 0 = Auto (measured), 0 = off, ..1.
+    pub dehalo: f32,
 }
 
 #[derive(uniffi::Record, Clone)]
@@ -367,6 +369,7 @@ impl PixelBoostCore {
             realism,
             adaptive: settings.adaptive,
             prescale: if settings.prescale > 0.0 { settings.prescale.min(1.0) } else { 1.0 },
+            dehalo: settings.dehalo.clamp(0.0, 1.0),
         };
         let lim = pb_core::stream::Limits { max_output_px: if settings.max_output_mp > 0.0 { (settings.max_output_mp as f64 * 1e6) as usize } else { 120_000_000 } };
         let res = pb_core::stream::upscale(&stack, &img, &st, lim, &mut |e| {
@@ -407,6 +410,7 @@ impl PixelBoostCore {
             .metric("realism", realism)
             .flag("adaptive", settings.adaptive)
             .metric("prescale", st.prescale)
+            .metric("dehalo_set", st.dehalo)
             .metric("passes", rep.passes as f64)
             .metric("tiles", rep.tiles as f64)
             .metric("fidelity_db", rep.fidelity_db)

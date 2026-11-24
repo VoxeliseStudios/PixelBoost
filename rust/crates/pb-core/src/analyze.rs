@@ -48,6 +48,8 @@ pub struct Measures {
     /// Drawn-art evidence at the real resolution (classify::Ink).
     pub line: f32,
     pub palette: f32,
+    /// Halo / ringing from earlier sharpening (dehalo::halo_score).
+    pub halo: f32,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -63,6 +65,8 @@ pub struct Recommendation {
     pub realism: f32,
     /// Photo + Clean fused per pixel by source texture (2x compute).
     pub adaptive: bool,
+    /// Remove halos from earlier sharpening first (0 = no, ..1).
+    pub dehalo: f32,
     /// Shrink the input to its real resolution first (1 = no): an image
     /// that was blown up before gives the network nothing at pixel scale,
     /// so it runs on the real detail and upscales from there.
@@ -257,12 +261,34 @@ fn skin_share(small: &Image) -> f32 {
     s as f32 / n.max(1) as f32
 }
 
+/// Halo score above which the real resolution is judged on an un-sharpened copy.
+const HALO_EFF: f32 = 0.12;
+const HALO_SIGMA: f32 = 0.8;
+
 /// Measures from a native-resolution centre crop (noise, blocking,
 /// sharpness) and a small copy of the whole photo (content, skin, light).
 pub fn measure_parts(crop: &Image, small: &Image, width: usize, height: usize, has_alpha: bool) -> Measures {
+    // Halos from earlier sharpening read as fine detail: judge the real
+    // resolution and sharpness on a de-haloed copy.
+    let (halo, _) = crate::dehalo::halo_score(crop);
+    let hs = crate::dehalo::strength_for(halo);
+    let dh;
+    let crop = if hs > 0.0 {
+        dh = crate::dehalo::dehalo(crop, hs);
+        &dh
+    } else {
+        crop
+    };
     let l = luma255(crop);
     let st = classify::stats(small);
-    let eff = classify::effective_scale(crop);
+    // Sharpening also lifts fine texture everywhere (not only edges), which
+    // hides a blown-up picture's real resolution: with clear halos, judge
+    // it on a copy where that boost is undone.
+    let eff = if halo > HALO_EFF {
+        classify::effective_scale(&crate::filters::gauss(crop, HALO_SIGMA))
+    } else {
+        classify::effective_scale(crop)
+    };
     let ink = classify::ink(&classify::at_real_resolution(small, eff, width, 512));
     // Sharpness of what the network will actually see (after prescale).
     let sharp_src = if eff >= 1.5 { classify::at_real_resolution(crop, eff, crop.w, usize::MAX) } else { crop.clone() };
@@ -290,6 +316,7 @@ pub fn measure_parts(crop: &Image, small: &Image, width: usize, height: usize, h
         eff,
         line: ink.line,
         palette: ink.palette,
+        halo,
     }
 }
 
@@ -379,6 +406,7 @@ pub struct Fixed {
     pub realism: Option<f32>,
     pub adaptive: Option<bool>,
     pub prescale: Option<f32>,
+    pub dehalo: Option<f32>,
 }
 
 pub fn recommend(m: &Measures, b: Budget) -> Recommendation {
@@ -597,7 +625,11 @@ pub fn recommend_fixed(m: &Measures, b: Budget, fx: &Fixed) -> Recommendation {
         ""
     };
     let summary = format!("{what} · {}× · {name}{extra}", scale as u32);
-    let r = Recommendation { model: model.into(), scale, fidelity: fidelity.into(), detail, denoise, ensemble, realism, adaptive, prescale, est_seconds, reasons: why, summary };
+    let dehalo = fx.dehalo.unwrap_or_else(|| crate::dehalo::strength_for(m.halo));
+    if fx.dehalo.is_none() && dehalo > 0.0 {
+        why.push(format!("Sharpening halos ({}%) → removed before upscaling", pct(m.halo.min(1.0))));
+    }
+    let r = Recommendation { model: model.into(), scale, fidelity: fidelity.into(), detail, denoise, ensemble, realism, adaptive, dehalo, prescale, est_seconds, reasons: why, summary };
     report(m, b, fx, &r);
     r
 }
@@ -620,6 +652,7 @@ fn report(m: &Measures, b: Budget, fx: &Fixed, r: &Recommendation) {
         ("realism", fx.realism.is_some()),
         ("adaptive", fx.adaptive.is_some()),
         ("prescale", fx.prescale.is_some()),
+        ("dehalo", fx.dehalo.is_some()),
     ]
     .iter()
     .filter(|f| f.1)

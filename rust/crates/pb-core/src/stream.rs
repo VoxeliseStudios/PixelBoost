@@ -472,6 +472,15 @@ fn axis_taps(o0: usize, o1: usize, m: usize, o: usize, origin: isize, len: usize
 
 /// Upscale `img` per `st`, bounded by `lim`. Returns the 8-bit result.
 pub fn upscale(engine: &dyn Upscaler, img: &Image, st: &Settings, lim: Limits, progress: &mut dyn FnMut(StreamEvent<'_>) -> bool) -> Option<(Rgba8, Report, bool)> {
+    if st.dehalo > 0.0 {
+        let clean = crate::dehalo::dehalo(img, st.dehalo);
+        let mut s2 = st.clone();
+        s2.dehalo = 0.0;
+        return upscale(engine, &clean, &s2, lim, progress).map(|(o, mut rep, c)| {
+            rep.dehalo = st.dehalo;
+            (o, rep, c)
+        });
+    }
     // Prescale: shrink to the real resolution, then upscale by the
     // correspondingly larger factor so the output size is unchanged.
     let p = st.prescale;

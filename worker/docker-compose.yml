@@ -20,6 +20,14 @@ services:
       - MAX_OUTPUT_MP=300
       - RESULT_TTL_HOURS=168
       - MODELS_EXTRA_DIR=/models-extra
+      # Networks on the iGPU when it beats the CPU (autotuned); paused while
+      # a game runs (gamemode hooks touch /jobs/.gaming).
+      - PB_BACKEND=auto
+      - PB_GPU_TUNE=/jobs/.gpu-tune.json
+    devices:
+      - /dev/dri/renderD128:/dev/dri/renderD128
+    group_add:
+      - "987"
     volumes:
       - /mnt/fastssd/pixelboost-jobs:/jobs
       - ../Models/pbnn:/models:ro

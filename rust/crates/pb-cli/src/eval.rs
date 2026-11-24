@@ -43,6 +43,7 @@ pub fn upscale_cmd(args: &[String]) -> Result<(), String> {
             realism: r.realism,
             adaptive: r.adaptive,
             prescale: r.prescale,
+            dehalo: r.dehalo,
         };
         let denoise = (r.denoise > 0.0).then_some(r.denoise);
         let stack = pb_core::fusion::Stack::load(&dir, &r.model, denoise, r.realism, r.adaptive)?;

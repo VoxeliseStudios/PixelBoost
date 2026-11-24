@@ -57,6 +57,13 @@ struct JobSettings {
     /// Shrink to the real resolution first: 0 = Auto, 1 = off.
     #[serde(default = "full")]
     prescale: f32,
+    /// Remove sharpening halos first: < 0 = Auto, 0 = off.
+    #[serde(default = "auto_neg")]
+    dehalo: f32,
+}
+
+fn auto_neg() -> f32 {
+    -1.0
 }
 
 fn full() -> f32 {
@@ -424,7 +431,7 @@ fn run_job(app: &App, id: &str, cancel: Arc<AtomicBool>, engines: &mut Option<(S
     // Settings left on Auto (model "auto", clarity "auto", detail < 0,
     // quality 0, prescale 0) are decided from the photo with the server's
     // budget: no time limit, so Adaptive photos and more quality passes.
-    let any_auto = s.model == "auto" || s.fidelity == "auto" || s.detail < 0.0 || s.ensemble == 0 || s.prescale <= 0.0;
+    let any_auto = s.model == "auto" || s.fidelity == "auto" || s.detail < 0.0 || s.ensemble == 0 || s.prescale <= 0.0 || s.dehalo < 0.0;
     let mut s = s.clone();
     if any_auto {
         let m = pb_core::analyze::measure(&img);
@@ -439,6 +446,7 @@ fn run_job(app: &App, id: &str, cancel: Arc<AtomicBool>, engines: &mut Option<(S
             realism: photo.then_some(s.realism),
             adaptive: photo.then_some(s.adaptive),
             prescale: (s.prescale > 0.0).then_some(s.prescale),
+            dehalo: (s.dehalo >= 0.0).then_some(s.dehalo),
         };
         let b = pb_core::analyze::Budget { gflops: 150.0, max_seconds: 1e9, max_output_mp: (app.max_px as f32 / 1e6), cloud: true };
         let r = pb_core::analyze::recommend_fixed(&m, b, &fx);
@@ -452,6 +460,7 @@ fn run_job(app: &App, id: &str, cancel: Arc<AtomicBool>, engines: &mut Option<(S
         s.realism = r.realism;
         s.adaptive = r.adaptive;
         s.prescale = r.prescale;
+        s.dehalo = r.dehalo;
     }
     let (model, adaptive) = (s.model.clone(), s.adaptive);
     let realism = s.realism.clamp(0.0, 1.0);
@@ -476,6 +485,7 @@ fn run_job(app: &App, id: &str, cancel: Arc<AtomicBool>, engines: &mut Option<(S
         tile: 192,
         pad: 16,
         ensemble: s.ensemble.max(1) as usize,
+        dehalo: s.dehalo.clamp(0.0, 1.0),
     };
     let used = Upscaler::label(engine);
     app.update(id, |j| j.model_used = used.clone(), false);
@@ -659,6 +669,11 @@ fn load_jobs(app: &Shared) {
     }
 }
 
+#[cfg(feature = "gpu")]
+fn pb_gpu_pause(on: bool) {
+    pb_core::engine::set_gpu_paused(on);
+}
+
 static TELEMETRY: std::sync::OnceLock<Arc<pb_core::telemetry::Collector>> = std::sync::OnceLock::new();
 
 /// The bridge pulls the worker's telemetry (it holds the database): every
@@ -710,6 +725,24 @@ async fn main() {
     pb_core::engine::set_models_dir(&app.models);
     if let Ok(extra) = std::env::var("MODELS_EXTRA_DIR") {
         pb_core::set_extra_model_dirs(vec![PathBuf::from(extra)]);
+    }
+    // Yield the GPU to games: the gamemode hooks create `<jobs>/.gaming`.
+    #[cfg(feature = "gpu")]
+    {
+        let flag = app.dir.join(".gaming");
+        std::thread::spawn(move || {
+            let mut was = false;
+            loop {
+                let now = flag.exists();
+                if now != was {
+                    pb_gpu_pause(now);
+                    pb_core::telemetry::event("worker", if now { "gpu_yield" } else { "gpu_resume" }).emit();
+                    println!("worker: game {} -> GPU {}", if now { "started" } else { "ended" }, if now { "paused" } else { "resumed" });
+                    was = now;
+                }
+                std::thread::sleep(Duration::from_secs(2));
+            }
+        });
     }
     let col = Arc::new(pb_core::telemetry::Collector::default());
     let _ = TELEMETRY.set(col.clone());

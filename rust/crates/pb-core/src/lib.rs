@@ -3,6 +3,7 @@
 pub mod analyze;
 pub mod classify;
 pub mod compose;
+pub mod dehalo;
 pub mod develop;
 pub mod draw;
 pub mod edit;

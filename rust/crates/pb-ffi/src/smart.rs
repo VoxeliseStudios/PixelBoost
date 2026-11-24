@@ -22,6 +22,8 @@ pub struct PhotoAnalysis {
     /// Real detail as a fraction of the pixel size (1 = sharp; 0.25 = the
     /// image was blown up 4x before).
     pub real_resolution: f32,
+    /// Sharpening halos 0..1 (an earlier upscaler / sharpener).
+    pub halo: f32,
     /// The settings chosen for this photo.
     pub settings: UpscaleSettings,
     pub est_seconds: f32,
@@ -126,6 +128,7 @@ pub(crate) fn fixed_of(s: &UpscaleSettings) -> analyze::Fixed {
         realism: photo.then_some(if s.realism > 0.0 { s.realism } else { 1.0 }),
         adaptive: photo.then_some(s.adaptive),
         prescale: (s.prescale > 0.0).then_some(s.prescale),
+        dehalo: (s.dehalo >= 0.0).then_some(s.dehalo),
     }
 }
 
@@ -151,11 +154,14 @@ pub(crate) fn auto_fields(s: &UpscaleSettings) -> Vec<&'static str> {
     if s.prescale <= 0.0 {
         v.push("prescale");
     }
+    if s.dehalo < 0.0 {
+        v.push("dehalo");
+    }
     v
 }
 
 pub(crate) fn has_auto(s: &UpscaleSettings) -> bool {
-    s.model == "auto" || s.scale < 1.0 || s.fidelity == "auto" || s.detail < 0.0 || s.ensemble == 0 || s.prescale <= 0.0
+    s.model == "auto" || s.scale < 1.0 || s.fidelity == "auto" || s.detail < 0.0 || s.ensemble == 0 || s.prescale <= 0.0 || s.dehalo < 0.0
 }
 
 fn analysis(m: &analyze::Measures, b: Budget, fx: &analyze::Fixed, max_output_mp: f32) -> PhotoAnalysis {
@@ -170,6 +176,7 @@ fn analysis(m: &analyze::Measures, b: Budget, fx: &analyze::Fixed, max_output_mp
         skin: m.skin,
         has_alpha: m.has_alpha,
         real_resolution: 1.0 / m.eff.max(1.0),
+        halo: m.halo,
         settings: UpscaleSettings {
             model: r.model,
             scale: r.scale,
@@ -182,6 +189,7 @@ fn analysis(m: &analyze::Measures, b: Budget, fx: &analyze::Fixed, max_output_mp
             realism: r.realism,
             adaptive: r.adaptive,
             prescale: r.prescale,
+            dehalo: r.dehalo,
         },
         est_seconds: r.est_seconds,
         summary: r.summary,
